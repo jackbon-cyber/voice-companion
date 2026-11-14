@@ -21,6 +21,7 @@ __pycache__/
 
 # ===== 模型权重（体积大，走脚本按需下载，不入库）=====
 models/
+core/models/
 *.gguf
 *.bin
 *.onnx
