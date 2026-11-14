@@ -1,5 +1,6 @@
 package com.company.bj.voice.cloud.config;
 
+import com.company.bj.voice.cloud.downlink.DownlinkPublisher;
 import com.company.bj.voice.cloud.protocol.ProtocolValidator;
 import com.company.bj.voice.cloud.session.SessionRegistry;
 import java.nio.file.Path;
@@ -28,6 +29,17 @@ public class CloudBeansConfig {
     @Bean
     public ProtocolValidator protocolValidator() {
         return new ProtocolValidator(SCHEMA_DIR);
+    }
+
+    /**
+     * 构造下行发布器。
+     *
+     * @param protocolValidator 协议校验器
+     * @return 下行发布器
+     */
+    @Bean
+    public DownlinkPublisher downlinkPublisher(ProtocolValidator protocolValidator) {
+        return new DownlinkPublisher(protocolValidator);
     }
 
     /**

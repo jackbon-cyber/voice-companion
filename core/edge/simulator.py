@@ -36,6 +36,7 @@ from core.edge.dialog.factual import FactualGuard
 from core.edge.intent.detector import IntentDecision, IntentDetector
 from core.edge.metrics.collector import MetricsCollector
 from core.edge.session.state_machine import SessionStateMachine
+from core.edge.transport.downlink import TextReply, VoiceChunk
 from core.edge.transport.uplink import UplinkClient, UplinkError
 
 # 日志器。
@@ -127,6 +128,9 @@ class ScriptedRecognizer:
 class EdgeSimulator:
     """端侧模拟端。"""
 
+    #: 每轮结束后等待下行消息到达的秒数。
+    DOWNLINK_DRAIN_SECONDS = 0.3
+
     def __init__(
         self,
         session_id: str,
@@ -170,12 +174,58 @@ class EdgeSimulator:
         await self._client.send_session_begin(self._format)
         LOGGER.info("已连接云端并开始会话：%s", self._cloud_url)
 
+        # 下行读取放到后台任务：与上行并行，否则上行会阻塞在下行等待上。
+        receiver = asyncio.create_task(self._receive_downlink())
+
         try:
             for round_index in range(rounds):
                 await self._run_round(round_index)
+                await self._drain_downlink()
         finally:
+            receiver.cancel()
             await self._client.send_session_end("simulator_finished")
             await self._client.close()
+
+    async def _receive_downlink(self) -> None:
+        """后台接收下行消息。"""
+        try:
+            while True:
+                message = await self._client.receive_downlink(self._clock_ms)
+                if message is None:
+                    # 连接已关闭或读取失败。
+                    return
+                self._on_downlink(message)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - 后台任务不能因异常静默退出
+            LOGGER.warning("下行接收异常，已停止：%s", error)
+
+    def _on_downlink(self, message: object) -> None:
+        """处理一条下行消息。
+
+        @param message 下行消息
+        """
+        if isinstance(message, TextReply):
+            LOGGER.info("收到云端回复：%r（情感=%s）", message.text, message.emotion)
+            self._state_machine.on_playback_finished(self._clock_ms)
+        elif isinstance(message, VoiceChunk):
+            latency = self._client.downlink.first_packet_latency_ms(0)
+            LOGGER.info(
+                "收到语音片段：序号=%d 首包=%s 末包=%s 首包延迟=%sms",
+                message.sequence,
+                message.is_first,
+                message.is_last,
+                latency,
+            )
+            if message.is_last:
+                self._state_machine.on_playback_finished(self._clock_ms)
+
+    async def _drain_downlink(self) -> None:
+        """等待一小段时间，把已到达的下行消息处理掉。
+
+        @param 无
+        """
+        await asyncio.sleep(self.DOWNLINK_DRAIN_SECONDS)
 
     async def _run_round(self, round_index: int) -> None:
         """跑一轮。
@@ -229,7 +279,13 @@ class EdgeSimulator:
                 guard_result.category.value if guard_result.category else "未知",
             )
             self._state_machine.on_cloud_wait_started(self._clock_ms)
-            await self._send_intent_report(round_index, "unknown", result.confidence)
+            await self._send_intent_report(
+                IntentDecision(
+                    intent="unknown",
+                    confidence=result.confidence,
+                    handled_locally=False,
+                )
+            )
             return
 
         decision = self._intent.detect(result.text, result.confidence)
@@ -243,30 +299,20 @@ class EdgeSimulator:
 
         if not decision.handled_locally:
             self._state_machine.on_cloud_wait_started(self._clock_ms)
+            await self._send_intent_report(decision)
+            return
 
-        try:
-            await self._client.send_intent(decision)
-        except UplinkError as error:
-            LOGGER.warning("意图上行失败：%s", error)
-            self._degrade.record_uplink_failure()
+        # 本地已处理的意图**不上行**：端侧规则表已经执行完，再上行只会让云端
+        # 多生成一条回复，而这条回复对应的是"我已经做完了"，
+        # 用户会看到机器人答非所问地接话。
+        LOGGER.info("意图在端侧本地执行，不上行")
+        self._state_machine.on_playback_finished(self._clock_ms)
 
-        if decision.handled_locally:
-            LOGGER.info("意图在端侧本地执行，无需上云")
-
-    async def _send_intent_report(
-        self, round_index: int, intent: str, confidence: float
-    ) -> None:
+    async def _send_intent_report(self, decision: IntentDecision) -> None:
         """上行一条意图报告。
 
-        @param round_index 轮次序号
-        @param intent 意图标识
-        @param confidence 置信度
+        @param decision 意图判定结果
         """
-        decision = IntentDecision(
-            intent=intent,
-            confidence=confidence,
-            handled_locally=False,
-        )
         try:
             await self._client.send_intent(decision)
         except UplinkError as error:

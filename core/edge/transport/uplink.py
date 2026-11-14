@@ -19,6 +19,7 @@ from websockets.asyncio.client import connect
 from core.edge.audio.framer import Frame
 from core.edge.audio.negotiation import AudioFormat
 from core.edge.intent.detector import IntentDecision
+from core.edge.transport.downlink import DownlinkClient
 from core.protocol.validator import validation_errors
 
 
@@ -43,6 +44,7 @@ class UplinkClient:
         self._sequence = 0
         self._format: AudioFormat | None = None
         self._connection: Any = None
+        self._downlink = DownlinkClient(session_id)
 
     @property
     def session_id(self) -> str:
@@ -227,6 +229,32 @@ class UplinkClient:
             pass
         finally:
             self._connection = None
+
+    async def receive_downlink(self, now_ms: int) -> Any | None:
+        """接收一条下行消息。
+
+        上行与下行走**同一条连接**（WebSocket 是全双工的），因此下行消息
+        从同一个连接上读。分派交给 {@code DownlinkClient}。
+
+        @param now_ms 当前时间戳（毫秒），用于首包延迟测量
+        @return 解析出的下行消息；连接已关闭或消息被丢弃时为 None
+        """
+        if self._connection is None:
+            return None
+        try:
+            raw = await self._connection.recv()
+        except Exception:
+            # 连接关闭或读取失败：交给调用方决定是否重连。
+            return None
+        return self._downlink.handle_message(raw, now_ms)
+
+    @property
+    def downlink(self) -> DownlinkClient:
+        """下行接收器。
+
+        @return 下行接收器
+        """
+        return self._downlink
 
     def _validate(self, schema_name: str, payload: dict) -> None:
         """用协议 schema 校验一条上行消息。

@@ -88,7 +88,11 @@ async def test_factual_request_is_not_answered_locally(serve_echo):
 
 @pytest.mark.asyncio
 async def test_local_intent_is_not_sent_to_cloud(serve_echo):
-    """端侧已处理的意图不再上行 —— 少一条上行就少一份延迟与费用。"""
+    """端侧已处理的意图不再上行。
+
+    上行会让云端多生成一条回复，而这条回复对应的是"我已经做完了"，
+    用户会看到机器人答非所问地接话。
+    """
     received = []
 
     async def handler(connection):
@@ -104,4 +108,4 @@ async def test_local_intent_is_not_sent_to_cloud(serve_echo):
         await simulator.run(rounds=1)
 
     intents = [json.loads(message) for message in received if "intent" in message]
-    assert all(item["handledLocally"] is True for item in intents)
+    assert intents == []
