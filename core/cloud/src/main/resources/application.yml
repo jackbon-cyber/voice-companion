@@ -1,0 +1,27 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: voice-cloud
+  jackson:
+    default-property-inclusion: non_null
+
+voice:
+  chroma:
+    # ChromaDB 服务地址。默认与本地脚本启动的实例一致。
+    base-url: ${VOICE_CHROMA_BASE_URL:http://127.0.0.1:8765}
+    # ChromaDB 数据目录。
+    data-path: ${VOICE_CHROMA_DATA_PATH:data/chroma}
+  llm:
+    # 大模型服务地址与凭据，一律走环境变量，仓库内不出现真实值。
+    base-url: ${VOICE_LLM_BASE_URL:}
+    api-key: ${VOICE_LLM_API_KEY:}
+  mqtt:
+    host: ${VOICE_MQTT_HOST:127.0.0.1}
+    port: ${VOICE_MQTT_PORT:1883}
+
+logging:
+  level:
+    root: INFO
+    com.company.bj.voice.cloud: INFO
