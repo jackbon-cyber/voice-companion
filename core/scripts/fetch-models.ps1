@@ -19,7 +19,7 @@
     绝不用"期望值为空即视为通过"这种伪校验 —— 那会把下载损坏的文件当成好的。
 
 .PARAMETER Target
-    仅下载指定模型：'asr' / 'llm' / 'all'
+    仅下载指定模型：'asr' / 'llm' / 'embedding' / 'all'
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File core/scripts/fetch-models.ps1
@@ -27,7 +27,7 @@
 
 [CmdletBinding()]
 param(
-    [ValidateSet('asr', 'llm', 'all')]
+    [ValidateSet('asr', 'llm', 'embedding', 'all')]
     [string]$Target = 'all'
 )
 
@@ -46,6 +46,17 @@ $LlamaModelDir = Join-Path $ModelRoot 'llm'
 $LlamaModelFile = Join-Path $LlamaModelDir $LlamaModelName
 $LlamaRepository = 'Qwen/Qwen2.5-0.5B-Instruct-GGUF'
 $LlamaRemoteFile = 'qwen2.5-0.5b-instruct-q4_k_m.gguf'
+
+# 本地嵌入模型。量化 ONNX，22.9 MB，512 维。
+# 选它是因为评测门禁的"记忆召回"维度需要真实语义召回，
+# 而远端嵌入 API 需要凭据 —— 有了本地模型，"克隆下来就能跑出真实指标"才成立。
+$EmbeddingModelDir = Join-Path $ModelRoot 'embedding'
+$EmbeddingRepository = 'Xenova/bge-small-zh-v1.5'
+$EmbeddingFiles = @{
+    'model.onnx'      = 'onnx/model_quantized.onnx'
+    'tokenizer.json'  = 'tokenizer.json'
+    'config.json'     = 'config.json'
+}
 
 # sha256 清单。放在模型根目录，与权重同寿命。
 $ChecksumFile = Join-Path $ModelRoot 'SHA256SUMS'
@@ -191,14 +202,16 @@ if ($Target -in @('asr', 'all')) {
     Write-Host '=== 端侧 ASR 模型（faster-whisper base）==='
     New-Item -ItemType Directory -Force -Path $AsrModelDir | Out-Null
     foreach ($fileName in $AsrRequiredFiles) {
-        $target = Join-Path $AsrModelDir $fileName
+        # 变量名不能叫 $target：PowerShell 变量名不区分大小写，
+        # $target 会覆盖脚本自身的 -Target 参数，赋值时触发 ValidateSet 重新校验而报错。
+        $targetFile = Join-Path $AsrModelDir $fileName
         $relative = Join-Path 'asr' $fileName
-        if (Test-FileIntegrity -Path $target -RelativePath $relative) {
+        if (Test-FileIntegrity -Path $targetFile -RelativePath $relative) {
             Write-Host "已存在，跳过：$relative"
             continue
         }
         $url = Resolve-HfMirrorUrl -Repository "$AsrRepository/resolve/main/$fileName"
-        Invoke-FileDownload -Uri $url -OutFile $target -RelativePath $relative
+        Invoke-FileDownload -Uri $url -OutFile $targetFile -RelativePath $relative
     }
     Write-Host "ASR 模型目录：$AsrModelDir"
 }
@@ -215,7 +228,26 @@ if ($Target -in @('llm', 'all')) {
     }
 }
 
+if ($Target -in @('embedding', 'all')) {
+    Write-Host '=== 本地嵌入模型（BGE-small-zh 量化 ONNX）==='
+    New-Item -ItemType Directory -Force -Path $EmbeddingModelDir | Out-Null
+    foreach ($localName in $EmbeddingFiles.Keys) {
+        $remotePath = $EmbeddingFiles[$localName]
+        # 同样不能用 $target，理由见 ASR 分支的注释。
+        $targetFile = Join-Path $EmbeddingModelDir $localName
+        $relative = Join-Path 'embedding' $localName
+        if (Test-FileIntegrity -Path $targetFile -RelativePath $relative) {
+            Write-Host "已存在，跳过：$relative"
+            continue
+        }
+        $url = Resolve-HfMirrorUrl -Repository "$EmbeddingRepository/resolve/main/$remotePath"
+        Invoke-FileDownload -Uri $url -OutFile $targetFile -RelativePath $relative
+    }
+    Write-Host "嵌入模型目录：$EmbeddingModelDir"
+}
+
 Write-Host ''
 Write-Host '模型准备完成。'
 Write-Host "sha256 清单：$ChecksumFile"
-Write-Host '提示：两个模型都是可选的，缺失时端侧会自动降级（ASR → NullRecognizer，对话 → 话术库）。'
+Write-Host '提示：三个模型都是可选的，缺失时端侧会自动降级（ASR → NullRecognizer，对话 → 话术库）。'
+Write-Host '      嵌入模型缺失时，云端记忆召回会退化为词面匹配，并在评测报告中明确标注。'
