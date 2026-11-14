@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/control-channel.schema.json",
+  "title": "控制通道消息",
+  "description": "设备管理通道的上行报告与下行下发。控制通道故障不得导致音频会话中断。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "direction", "type"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "direction": {
+      "type": "string",
+      "enum": ["up", "down"]
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "statusReport",
+        "metricReport",
+        "faultReport",
+        "sessionEvent",
+        "configPush",
+        "profileDelta",
+        "versionNotice",
+        "diagnosticCommand"
+      ]
+    },
+    "payload": {
+      "type": "object",
+      "description": "载荷内容，随 type 而定。"
+    },
+    "payloadBytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8192,
+      "description": "载荷字节数。profileDelta 的上限为 8192，超限的消息被拒绝而不是截断。"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "profileDelta" } },
+        "required": ["type"]
+      },
+      "then": {
+        "required": ["payloadBytes"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/audio-negotiation.schema.json",
+  "title": "音频格式协商",
+  "description": "连接建立时协商的音频格式参数。默认 16kHz 单声道 16bit PCM，帧长 20 毫秒。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sampleRate", "channels", "bitDepth", "encoding", "frameDurationMs"],
+  "properties": {
+    "sampleRate": {
+      "type": "integer",
+      "enum": [16000, 24000, 48000]
+    },
+    "channels": {
+      "type": "integer",
+      "enum": [1]
+    },
+    "bitDepth": {
+      "type": "integer",
+      "enum": [16]
+    },
+    "encoding": {
+      "type": "string",
+      "enum": ["PCM_S16LE", "OPUS"]
+    },
+    "frameDurationMs": {
+      "type": "integer",
+      "const": 20
+    },
+    "opusBitRate": {
+      "type": "integer",
+      "minimum": 6000,
+      "maximum": 510000,
+      "description": "Opus 码率。encoding=OPUS 时必填。"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "encoding": { "const": "OPUS" } },
+        "required": ["encoding"]
+      },
+      "then": {
+        "required": ["opusBitRate"]
+      }
+    }
+  ]
+}

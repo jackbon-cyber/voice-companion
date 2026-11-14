@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/text-reply.schema.json",
+  "title": "下行文本回复",
+  "description": "云端下发的纯文本回复。设备关闭语音输出时使用该形态。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "text", "emotion"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "回复正文。"
+    },
+    "emotion": {
+      "type": "string",
+      "enum": ["neutral", "joy", "sadness", "anger", "fear", "surprise", "tenderness", "encouragement"],
+      "description": "情感标签。与文本同时产生，不需要额外一次模型调用。"
+    },
+    "citations": {
+      "type": "array",
+      "description": "回复所引用的记忆或知识片段标识。",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/audio-frame.schema.json",
+  "title": "上行音频帧",
+  "description": "端侧上行的单帧音频。帧长固定 20 毫秒，半帧必须补齐后再上行。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "sequence", "timestampMs", "sampleRate", "payloadBase64"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "会话标识。连接中断重连时保持不变，避免被当作新会话。"
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "帧序号，从 0 起连续递增；重连后从断点续传，不重发。"
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "该帧首采样点的会话内相对毫秒偏移。"
+    },
+    "sampleRate": {
+      "type": "integer",
+      "enum": [16000, 24000, 48000],
+      "description": "采样率。必须与协商结果一致。"
+    },
+    "channels": {
+      "type": "integer",
+      "enum": [1],
+      "description": "声道数。当前协议只支持单声道。"
+    },
+    "payloadBase64": {
+      "type": "string",
+      "description": "PCM 或 Opus 负载的 base64 文本。"
+    },
+    "isFinalPartial": {
+      "type": "boolean",
+      "description": "标记该帧为补齐后的尾帧。半帧补齐必须显式标记，不允许把半帧当完整帧上行。"
+    }
+  }
+}

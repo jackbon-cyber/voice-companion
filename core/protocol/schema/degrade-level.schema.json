@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/degrade-level.schema.json",
+  "title": "端侧降级档位",
+  "description": "端侧本地判定的降级档位上报。判定不依赖云端心跳。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["level"],
+  "properties": {
+    "level": {
+      "type": "string",
+      "enum": ["NORMAL", "DEGRADED_NETWORK", "OFFLINE", "MINIMAL"],
+      "description": "档位。由 NORMAL 到 MINIMAL 逐级下降，恢复时逐级回升。"
+    },
+    "reason": {
+      "type": "string",
+      "description": "降级原因，便于排查。"
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0
+    }
+  }
+}

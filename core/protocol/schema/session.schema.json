@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/session.schema.json",
+  "title": "会话生命周期消息",
+  "description": "会话的开始、进行中与结束三态消息，以及心跳。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "type"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "type": {
+      "type": "string",
+      "enum": ["begin", "keepalive", "end"],
+      "description": "会话状态。"
+    },
+    "reason": {
+      "type": "string",
+      "description": "结束原因。type=end 时必填。"
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "audioFormat": {
+      "$ref": "audio-negotiation.schema.json"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "type": { "const": "end" } },
+        "required": ["type"]
+      },
+      "then": {
+        "required": ["reason"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/voice-chunk.schema.json",
+  "title": "下行语音片段",
+  "description": "云端下发的流式语音片段。首片段带 isFirst，末片段带 isLast。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "sequence", "payloadBase64"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "片段序号，连续递增。"
+    },
+    "timestampMs": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "payloadBase64": {
+      "type": "string",
+      "minLength": 1
+    },
+    "isFirst": {
+      "type": "boolean",
+      "description": "首片段标记。用于端侧起播与首包延迟测量。"
+    },
+    "isLast": {
+      "type": "boolean",
+      "description": "末片段标记。"
+    },
+    "emotion": {
+      "type": "string",
+      "description": "情感标签，与文本回复的标签取自同一集合。"
+    }
+  }
+}
