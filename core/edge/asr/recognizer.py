@@ -1,0 +1,198 @@
+"""端侧语音识别适配层。
+
+把「端侧 ASR」抽象成一个接口，是为了在模型缺失时仍能跑通全链路：
+`faster-whisper` 的模型权重需要按需下载，评审者的机器上未必有；
+此时端侧应当**降级**（`NullRecognizer` + 规则意图），而不是崩掉。
+
+因此本模块的实现约定是：**任何实现都不允许在识别失败时抛出异常**，
+失败一律表现为「空文本 + 零置信度」，由上层据此拒识。
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import Protocol
+
+# 默认识别置信度阈值。低于该值视为拒识，不上云。
+DEFAULT_CONFIDENCE_THRESHOLD = 0.5
+
+# 默认模型规格。base 是速度与精度的平衡点，适合端侧 CPU 实时场景。
+DEFAULT_MODEL_SIZE = "base"
+
+# 默认推理设备。端侧 PC 模拟器没有 GPU。
+DEFAULT_DEVICE = "cpu"
+
+# 默认计算精度。int8 量化是 CPU 上的常规选择。
+DEFAULT_COMPUTE_TYPE = "int8"
+
+
+@dataclass(frozen=True)
+class RecognitionResult:
+    """一次识别的结果。"""
+
+    text: str
+    confidence: float
+    language: str
+
+
+class SpeechRecognizer(Protocol):
+    """端侧语音识别器契约。"""
+
+    hotwords: list[str]
+
+    def transcribe(self, pcm: bytes) -> RecognitionResult:
+        """识别一段 PCM 音频。
+
+        @param pcm PCM 音频字节
+        @return 识别结果；失败时返回空文本与零置信度，不抛异常
+        """
+        ...
+
+
+class NullRecognizer:
+    """永远识别不出东西的识别器。
+
+    用于模型缺失时的降级路径：整条链路照常运行，只是端侧不再识别语音，
+    改由规则意图与云端兜底。
+    """
+
+    def __init__(self) -> None:
+        """构造降级识别器。"""
+        self.hotwords: list[str] = []
+
+    def transcribe(self, pcm: bytes) -> RecognitionResult:
+        """返回空结果。
+
+        @param pcm PCM 音频字节，不作使用
+        @return 空文本、零置信度的识别结果
+        """
+        return RecognitionResult(text="", confidence=0.0, language="zh")
+
+
+class FasterWhisperRecognizer:
+    """基于 faster-whisper（CTranslate2 后端）的识别器。"""
+
+    def __init__(
+        self,
+        model_size: str = DEFAULT_MODEL_SIZE,
+        device: str = DEFAULT_DEVICE,
+        compute_type: str = DEFAULT_COMPUTE_TYPE,
+    ) -> None:
+        """加载识别模型。
+
+        @param model_size 模型规格名
+        @param device 推理设备
+        @param compute_type 计算精度
+        @throws RuntimeError 模型加载失败时抛出，消息里给出可执行的补救指引
+        """
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as error:
+            raise RuntimeError(
+                "端侧 ASR 需要 faster-whisper：请先执行 "
+                "`pip install -r core/requirements.txt`"
+            ) from error
+
+        try:
+            self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
+        except Exception as error:
+            raise RuntimeError(
+                f"端侧 ASR 模型 {model_size} 加载失败：{error}。"
+                "请先执行 `core/scripts/fetch-models.ps1` 下载模型权重。"
+            ) from error
+
+        self._hotwords: list[str] = []
+
+    @property
+    def hotwords(self) -> list[str]:
+        """热词列表。
+
+        @return 当前热词
+        """
+        return self._hotwords
+
+    @hotwords.setter
+    def hotwords(self, words: list[str]) -> None:
+        """设置热词。
+
+        热词用于提升人设专有名词与用户称呼的识别率。
+
+        @param words 热词列表
+        """
+        self._hotwords = list(words)
+
+    def transcribe(self, pcm: bytes) -> RecognitionResult:
+        """识别一段 PCM 音频。
+
+        @param pcm PCM 音频字节
+        @return 识别结果；识别失败时返回空文本与零置信度，不抛异常
+        """
+        if not pcm:
+            return RecognitionResult(text="", confidence=0.0, language="zh")
+
+        try:
+            segments, _ = self._model.transcribe(
+                self._to_wav(pcm),
+                language="zh",
+                initial_prompt="、".join(self._hotwords) if self._hotwords else None,
+            )
+            for segment in segments:
+                text = (segment.text or "").strip()
+                if text:
+                    return RecognitionResult(
+                        text=text,
+                        confidence=self._to_confidence(getattr(segment, "avg_logprob", None)),
+                        language="zh",
+                    )
+        except Exception:
+            # 识别失败表现为空结果：上层据此拒识，比把异常抛到主循环安全。
+            return RecognitionResult(text="", confidence=0.0, language="zh")
+
+        return RecognitionResult(text="", confidence=0.0, language="zh")
+
+    def _to_confidence(self, avg_logprob: float | None) -> float:
+        """把 Whisper 的平均对数概率换算成 [0, 1] 的置信度。
+
+        faster-whisper 给的是 ``avg_logprob``（自然对数刻度，典型值在 -1 到 0 之间），
+        它不是概率。直接拿它跟 0.5 比较会得出"几乎总是拒识"的结论，
+        因此这里取指数还原为概率。
+
+        @param avg_logprob 平均对数概率，可为 None
+        @return 置信度，取值区间 [0, 1]
+        """
+        if avg_logprob is None:
+            return 0.0
+        return max(0.0, min(1.0, math.exp(avg_logprob)))
+
+    def _to_wav(self, pcm: bytes) -> bytes:
+        """把裸 PCM 包成 WAV。
+
+        @param pcm PCM 音频字节
+        @return WAV 文件字节
+        """
+        import io
+        import wave
+
+        buffer = io.BytesIO()
+        with wave.open(buffer, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(pcm)
+        return buffer.getvalue()
+
+
+def is_confident(result: RecognitionResult, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD) -> bool:
+    """判定识别结果是否可信到可以上云。
+
+    **先判文本非空，再判置信度**：空文本的高置信度是模型噪声而非有效识别，
+    例如背景音被识别成了一串标点，置信度可能反而不低。
+
+    @param result 识别结果
+    @param threshold 置信度阈值
+    @return 可信返回 True
+    """
+    if not result.text.strip():
+        return False
+    return result.confidence >= threshold
