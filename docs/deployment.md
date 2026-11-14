@@ -1,0 +1,228 @@
+# 部署手册
+
+> 面向**部署人员**，不是面向使用者。使用者看 `core/README.md`。
+>
+> 本手册覆盖的是**当前已实现**的部分。尚未实现的能力（云端鉴权、下行下发、
+> Redis 会话存储等）见 `docs/known-limitations.md`，**不要按它们规划生产部署**。
+
+---
+
+## 1. 部署形态
+
+当前形态是**单机部署**：ChromaDB、云端后端、端侧模拟端都跑在一台机器上。
+
+```
+┌─────────────────────────────────────────────────────┐
+│  单机                                                │
+│                                                      │
+│  ┌──────────────┐      ┌────────────────────┐       │
+│  │ ChromaDB     │◄─────┤ 云端后端            │       │
+│  │ :8765        │      │ :8080              │       │
+│  └──────────────┘      │  ├ /api/health     │       │
+│                        │  └ /voice/uplink   │       │
+│                        └────────────────────┘       │
+│                              ▲                     │
+│                              │ WebSocket           │
+│                        ┌─────┴──────────┐          │
+│                        │ 端侧模拟端      │          │
+│                        │ (Python)       │          │
+│                        └────────────────┘          │
+└─────────────────────────────────────────────────────┘
+```
+
+**当前不支持**：多实例部署、负载均衡、跨机部署。
+云端的会话注册表是**进程内**的，多实例之间不共享（见已知限制 2.2）。
+
+---
+
+## 2. 环境变量清单
+
+**仓库内不出现任何真实凭据。** 全部通过环境变量注入。
+
+| 变量 | 必填 | 默认值 | 说明 | 未设置的后果 |
+|---|---|---|---|---|
+| `JAVA_HOME` | 是 | `F:\tools\jdk21\jdk-21.0.13+9` | JDK 21 路径 | 用 JDK 17 编译失败（class file 61.0 vs 65.0） |
+| `VOICE_CHROMA_BASE_URL` | 否 | `http://127.0.0.1:8765` | ChromaDB 地址 | 云端启动时连通性检查失败 |
+| `VOICE_CHROMA_DATA_PATH` | 否 | `data/chroma` | ChromaDB 数据目录 | 数据落在默认位置 |
+| `VOICE_LLM_BASE_URL` | 否 | 空 | 大模型服务地址 | 云端走降级路径（当前阶段本来就没接） |
+| `VOICE_LLM_API_KEY` | 否 | 空 | 大模型 API Key | 同上 |
+| `VOICE_MQTT_HOST` | 否 | `127.0.0.1` | MQTT Broker 地址 | 控制通道不可用 |
+| `VOICE_MQTT_PORT` | 否 | `1883` | MQTT Broker 端口 | 同上 |
+
+**设置方式**（PowerShell，永久生效）：
+
+```powershell
+[Environment]::SetEnvironmentVariable('VOICE_CHROMA_BASE_URL', 'http://127.0.0.1:8765', 'User')
+```
+
+---
+
+## 3. 端口与资源
+
+| 服务 | 端口 | 协议 | 资源需求 |
+|---|---|---|---|
+| ChromaDB | 8765 | HTTP | 内存 ≥ 512MB；磁盘按数据量 |
+| 云端后端 | 8080 | HTTP + WebSocket | JVM 堆 ≥ 512MB；磁盘 ≥ 200MB |
+| 端侧模拟端 | 无（出站连接） | WebSocket 客户端 | 内存 ≥ 256MB |
+| MQTT Broker | 1883 | MQTT | 外部依赖，当前未纳入启动脚本 |
+
+**当前无 GPU 需求** —— 云端尚未接入大模型，端侧模型为可选。
+
+### 资源实测
+
+| 场景 | 内存 | 说明 |
+|---|---|---|
+| 仅 ChromaDB + 云端后端（空闲） | 约 700MB | JVM 默认堆 + Chroma 常驻 |
+| 加端侧模拟端（无模型） | 约 900MB | |
+| 加端侧模拟端（有 Whisper base） | 约 1.5GB | 未实测，估算值，需实测替换 |
+
+> 上表除前两行外均为估算。**实测值应替换估算值**（见已知限制 2.11）。
+
+---
+
+## 4. 模型清单
+
+**两个端侧模型都是可选的**，缺失时端侧自动降级：
+
+| 模型 | 大小 | 用途 | 缺失时的降级行为 | 获取方式 |
+|---|---|---|---|---|
+| `faster-whisper-base` | 约 150MB | 端侧 ASR | `NullRecognizer`（识别不出文字），意图只能靠规则表命中 | `fetch-models.ps1 -Target asr` |
+| `Qwen2.5-0.5B-Instruct-Q4_K_M.gguf` | 约 400MB | 端侧对话 | 话术库（固定话术，不结合上下文） | `fetch-models.ps1 -Target llm` |
+
+模型落在 `core/models/`，**不入库**（见 ADR-006）。
+
+**完整性校验**：下载后 sha256 记入 `core/models/SHA256SUMS`，
+下次运行 `fetch-models.ps1` 时强制比对。**不匹配会重新下载** ——
+下载损坏的模型表现为"识别效果差"，极难排查，因此这一层校验不能省。
+
+**生产环境建议**：把权重分发到内网制品库，而非每个部署点都从公网镜像拉。
+
+---
+
+## 5. 启动顺序
+
+**顺序是固定的**：
+
+```
+ChromaDB → 云端后端 → 端侧模拟端
+```
+
+Chroma 必须先于后端起来 —— 后端启动时做一次 Chroma 连通性检查，
+Chroma 没就绪会让后端启动失败。
+
+```powershell
+# 1. 起 ChromaDB + 云端后端（脚本会自动等待两个健康检查通过）
+powershell -ExecutionPolicy Bypass -File core\scripts\start.ps1
+
+# 2. 起端侧模拟端（另开一个终端，在仓库根执行）
+F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:8080/voice/uplink
+
+# 3. 停环境
+powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
+```
+
+**为什么端侧要"在仓库根执行"**：端侧代码位于 `core/` 包下，
+模块全名是 `core.edge.simulator`。在 `core/` 目录里执行
+`python -m edge.simulator` 会因包路径不对而失败。
+
+### 分步启动（排障用）
+
+```powershell
+# 只起 Chroma
+powershell -ExecutionPolicy Bypass -File core\scripts\chroma.ps1 start
+powershell -ExecutionPolicy Bypass -File core\scripts\chroma.ps1 status
+
+# 只起后端（假定 Chroma 已在跑）
+powershell -ExecutionPolicy Bypass -File core\scripts\start.ps1 -SkipChroma
+
+# 只起 Chroma，不起后端
+powershell -ExecutionPolicy Bypass -File core\scripts\start.ps1 -SkipBackend
+```
+
+---
+
+## 6. 健康检查
+
+| 检查项 | 地址 | 期望响应 | 检查时机 |
+|---|---|---|---|
+| ChromaDB | `http://127.0.0.1:8765/api/v2/version` | HTTP 200 | `start.ps1` 自动等待 |
+| 云端后端 | `http://127.0.0.1:8080/api/health` | `{"status":"UP"}` | `start.ps1` 自动等待 |
+| 上行通道 | `ws://127.0.0.1:8080/voice/uplink` | 连接成功 | 端侧连接时验证 |
+
+**注意 `/api/health` 只检查进程存活**，不检查 Chroma 连通性 ——
+Chroma 挂了后端仍会报 UP。需要更严格的探针时应新增端点。
+
+---
+
+## 7. 日志
+
+| 日志 | 位置 | 内容 |
+|---|---|---|
+| 云端后端 | `core/cloud/logs/backend.out.log` | Spring Boot 全量输出 |
+| 云端后端错误 | `core/cloud/logs/backend.err.log` | 标准错误流 |
+| 端侧模拟端 | 控制台 | 通过 `logging` 模块输出 |
+
+**`logs/` 已在 `.gitignore` 中**，不会入库。
+
+**排查云端问题时第一件事**：看 `core/cloud/logs/backend.out.log`。
+`start.ps1` 以隐藏窗口 + 重定向方式启动后端，
+日志不落盘就完全看不到后端的任何状态。
+
+---
+
+## 8. 排查路径
+
+按现象定位：
+
+| 现象 | 先看 | 常见原因 |
+|---|---|---|
+| `start.ps1` 报 Chroma 未就绪 | `chroma.ps1 status` | 8765 被占用；`data/chroma` 目录权限 |
+| `start.ps1` 报后端未就绪 | `core/cloud/logs/backend.out.log` | JDK 版本不对（须 21）；Maven 仓库路径；Chroma 未起 |
+| 端侧报"上行链路失败" | 后端日志 | 8080 未起；后端已崩 |
+| 端侧一直"识别不可信" | — | 正常：真实识别需要模型权重，模拟端用脚本识别器 |
+| 端侧报协议校验失败 | 后端日志 | 两侧 schema 版本不一致 —— 跑 `validate-protocol.ps1` |
+| 会话注册了但没回收 | 后端日志 | 心跳超时的定时扫描未实现（已知限制 2.4） |
+
+### 协议不一致的排查
+
+两侧判定分歧是最难查的一类问题。**先跑协议校验**：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File core\scripts\validate-protocol.ps1
+```
+
+- 校验**通过**但线上不一致 → 两侧收到的字节不同（编码、截断、大小写）
+- 校验**失败** → schema 与样例不一致，按输出逐条修
+
+---
+
+## 9. 卸载
+
+```powershell
+# 停服务
+powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
+
+# 删数据（Chroma 数据目录）
+Remove-Item -Recurse -Force data\chroma
+
+# 删模型
+Remove-Item -Recurse -Force core\models
+```
+
+`data/` 与 `core/models/` 都在 `.gitignore` 中，卸载时一并清理即可。
+
+---
+
+## 10. 生产部署前的待办
+
+**当前形态不能直接上生产。** 上生产前至少要完成：
+
+| 项 | 依据 |
+|---|---|
+| 云端鉴权（任何能连到端口的客户端都能建会话） | 已知限制 2.1 |
+| 下行语音下发（当前机器人不回话） | 已知限制 2.6 |
+| 会话状态外置（Redis）+ 一致性哈希环 | 已知限制 2.2 |
+| 心跳超时扫描的定时器 | 已知限制 2.4 |
+| 真实模型实测数据替换估算值 | 已知限制 2.11 |
+| 评测门禁接入 CI | OpenSpec 任务 10.4 |
+| ADR 补充部署相关的决策（副本数、探针、日志采集） | `docs/adr/README.md` |

@@ -109,3 +109,58 @@ def test_no_undocumented_module_references():
     missing = [path for path in referenced if not (REPO_ROOT / path).exists()]
 
     assert not missing, f"二次开发指南引用了不存在的文件：{missing}"
+
+
+def test_deployment_manual_lists_all_environment_variables():
+    """部署手册必须覆盖 application.yml 里定义的每一个环境变量。"""
+    manual = _doc_text("docs/deployment.md")
+    config = (REPO_ROOT / "core" / "cloud" / "src" / "main" / "resources" / "application.yml").read_text(
+        encoding="utf-8"
+    )
+
+    variables = set(re.findall(r"\$\{(VOICE_[A-Z_]+)", config))
+
+    missing = sorted(name for name in variables if name not in manual)
+
+    assert not missing, f"部署手册缺少这些环境变量：{missing}"
+
+
+def test_deployment_manual_covers_all_ports():
+    """部署手册要覆盖实际使用的端口。"""
+    manual = _doc_text("docs/deployment.md")
+
+    for port in ("8765", "8080", "1883"):
+        assert port in manual, f"部署手册缺少端口 {port}"
+
+
+def test_deployment_manual_has_troubleshooting_section():
+    manual = _doc_text("docs/deployment.md")
+
+    assert "排查路径" in manual
+    assert "常见原因" in manual
+
+
+def test_root_readme_points_to_all_docs():
+    """根 README 是入口，必须能导航到全部交付文档。"""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for relative_path in (
+        "docs/adr/README.md",
+        "docs/interface-contract/README.md",
+        "docs/deployment.md",
+        "docs/known-limitations.md",
+        "docs/secondary-development.md",
+        "core/README.md",
+    ):
+        assert relative_path in readme, f"根 README 未链接 {relative_path}"
+
+
+def test_root_readme_quickstart_command_is_runnable():
+    """根 README 的启动命令必须与实际脚本一致 —— 拼错的命令没人会发现。"""
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start_script = (REPO_ROOT / "core" / "scripts" / "start.ps1").read_text(encoding="utf-8")
+
+    assert "core\\scripts\\start.ps1" in readme
+    assert "core.edge.simulator" in readme
+    # 启动脚本与 README 必须给出同一个模拟端命令。
+    assert "core.edge.simulator" in start_script
