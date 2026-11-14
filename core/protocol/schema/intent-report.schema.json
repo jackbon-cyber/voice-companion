@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/protocol/intent-report.schema.json",
+  "title": "上行意图报告",
+  "description": "端侧意图判定结果的上行报告。端侧只负责分类，长尾意图由云端执行。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "sequence", "intent", "confidence", "handledLocally"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "上行消息序号，与音频帧共用同一序号空间，连续递增。"
+    },
+    "intent": {
+      "type": "string",
+      "minLength": 1,
+      "description": "意图标识。未知意图取 unknown。"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "handledLocally": {
+      "type": "boolean",
+      "description": "该意图是否已在端侧执行。为 false 时由云端执行。"
+    },
+    "slots": {
+      "type": "object",
+      "description": "意图参数。",
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  }
+}

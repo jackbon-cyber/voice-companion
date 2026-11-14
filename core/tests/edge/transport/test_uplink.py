@@ -127,3 +127,97 @@ async def test_send_frames_delivers_padded_tail_with_flag(serve_echo):
     import base64
 
     assert len(base64.b64decode(frame["payloadBase64"])) == 640
+
+
+@pytest.mark.asyncio
+async def test_session_begin_carries_negotiated_audio_format(serve_echo):
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        await client.send_session_begin()
+        await client.close()
+
+    message = json.loads(received[0])
+    assert message["type"] == "begin"
+    assert message["sessionId"] == "s-1"
+    assert message["audioFormat"]["sampleRate"] == 16000
+    assert message["audioFormat"]["frameDurationMs"] == 20
+
+
+@pytest.mark.asyncio
+async def test_keepalive_message_is_sent(serve_echo):
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        await client.send_keepalive()
+        await client.close()
+
+    assert json.loads(received[0])["type"] == "keepalive"
+
+
+@pytest.mark.asyncio
+async def test_intent_report_passes_protocol_validation(serve_echo):
+    from core.edge.intent.detector import IntentDecision
+
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        await client.send_intent(IntentDecision("play_music", 0.9, {}, True))
+        await client.close()
+
+    message = json.loads(received[0])
+    assert message["intent"] == "play_music"
+    assert message["handledLocally"] is True
+    assert "sequence" in message
+
+
+@pytest.mark.asyncio
+async def test_every_uplink_message_validates_against_a_schema(serve_echo):
+    """上行消息必须能被协议 schema 校验 —— 云端要能校验每一条上行消息。"""
+    from core.edge.intent.detector import IntentDecision
+    from core.protocol.validator import build_validator
+
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        await client.send_session_begin()
+        await client.send_audio_frame(b"\x01\x02", 0)
+        await client.send_intent(IntentDecision("play_music", 0.9, {}, True))
+        await client.send_keepalive()
+        await client.send_session_end("user_exit")
+        await client.close()
+
+    validators = {
+        name: build_validator(name)
+        for name in ("session", "audio-frame", "intent-report")
+    }
+    for raw in received:
+        message = json.loads(raw)
+        matched = [
+            name for name, validator in validators.items() if validator.is_valid(message)
+        ]
+        assert matched, f"上行消息不属于任何协议 schema：{message}"

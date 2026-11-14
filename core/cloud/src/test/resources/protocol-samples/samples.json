@@ -208,6 +208,55 @@
         "direction": "both",
         "type": "statusReport"
       }
+    },
+    {
+      "schema": "intent-report",
+      "valid": true,
+      "note": "本地已处理的意图",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 3,
+        "intent": "play_music",
+        "confidence": 0.9,
+        "handledLocally": true,
+        "slots": {}
+      }
+    },
+    {
+      "schema": "intent-report",
+      "valid": true,
+      "note": "待云端执行的长尾意图",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 4,
+        "intent": "book_appointment",
+        "confidence": 0.75,
+        "handledLocally": false,
+        "slots": { "time": "明天下午" }
+      }
+    },
+    {
+      "schema": "intent-report",
+      "valid": false,
+      "note": "缺少 handledLocally",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 5,
+        "intent": "play_music",
+        "confidence": 0.9
+      }
+    },
+    {
+      "schema": "intent-report",
+      "valid": false,
+      "note": "置信度超出取值区间",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 6,
+        "intent": "play_music",
+        "confidence": 1.5,
+        "handledLocally": true
+      }
     }
   ]
 }

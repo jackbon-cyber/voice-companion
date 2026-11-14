@@ -14,13 +14,12 @@ import base64
 import json
 from typing import Any
 
-from jsonschema import Draft202012Validator
 from websockets.asyncio.client import connect
 
 from core.edge.audio.framer import Frame
 from core.edge.audio.negotiation import AudioFormat
 from core.edge.intent.detector import IntentDecision
-from core.protocol.loader import load_schema
+from core.protocol.validator import validation_errors
 
 
 class UplinkError(RuntimeError):
@@ -141,17 +140,62 @@ class UplinkClient:
         """发送一条意图判定结果。
 
         @param decision 意图判定结果
-        @throws UplinkError 未连接时抛出
+        @throws UplinkError 未连接或协议校验不通过时抛出
         """
         if self._connection is None:
             raise UplinkError("上行连接未建立，不能发送意图")
         message = {
             "sessionId": self._session_id,
+            "sequence": self._sequence,
             "intent": decision.intent,
             "confidence": decision.confidence,
             "handledLocally": decision.handled_locally,
             "slots": decision.slots,
         }
+        self._validate("intent-report", message)
+        self._sequence += 1
+        await self._connection.send(json.dumps(message, ensure_ascii=False))
+
+    async def send_session_begin(self, audio_format: AudioFormat | None = None) -> None:
+        """发送会话开始消息。
+
+        会话开始必须**显式**发出而不是靠"发第一帧音频"隐含：
+        云端要在收到音频之前就知道会话存在，才能提前建立会话上下文
+        （粘滞路由、记忆装配都依赖这一步）。
+
+        @param audio_format 协商好的音频格式；为 None 时沿用已协商结果
+        @throws UplinkError 未连接或协议校验不通过时抛出
+        """
+        if self._connection is None:
+            raise UplinkError("上行连接未建立，不能发送会话开始消息")
+        negotiated = audio_format or self._format
+        message: dict = {
+            "sessionId": self._session_id,
+            "type": "begin",
+            "timestampMs": 0,
+        }
+        if negotiated is not None:
+            message["audioFormat"] = negotiated.to_payload()
+        self._validate("session", message)
+        await self._connection.send(json.dumps(message, ensure_ascii=False))
+
+    async def send_keepalive(self) -> None:
+        """发送一次应用层心跳。
+
+        心跳让云端能识别"设备还在但不说话"与"设备掉线"的区别：
+        没有心跳时，云端只能靠 TCP 超时判断掉线，会把长时间的静默误判为离线，
+        从而回收掉其实还活着的会话。
+
+        @throws UplinkError 未连接或协议校验不通过时抛出
+        """
+        if self._connection is None:
+            raise UplinkError("上行连接未建立，不能发送心跳")
+        message = {
+            "sessionId": self._session_id,
+            "type": "keepalive",
+            "timestampMs": 0,
+        }
+        self._validate("session", message)
         await self._connection.send(json.dumps(message, ensure_ascii=False))
 
     async def send_session_end(self, reason: str) -> None:
@@ -191,10 +235,6 @@ class UplinkClient:
         @param payload 消息载荷
         @throws UplinkError 校验不通过时抛出，消息里含被拒字段
         """
-        validator = Draft202012Validator(load_schema(schema_name))
-        errors = sorted(validator.iter_errors(payload), key=lambda error: list(error.absolute_path))
-        if not errors:
-            return
-        first = errors[0]
-        field = ".".join(str(part) for part in first.absolute_path) or "(根)"
-        raise UplinkError(f"上行消息不符合 {schema_name} 协议，字段 {field}：{first.message}")
+        errors = validation_errors(schema_name, payload)
+        if errors:
+            raise UplinkError(f"上行消息不符合 {schema_name} 协议，{errors[0]}")

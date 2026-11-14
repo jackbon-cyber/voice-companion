@@ -12,9 +12,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from jsonschema import Draft202012Validator
-
 from core.protocol.loader import load_schema
+from core.protocol.validator import validation_errors
 
 # 协议里定义的编码方式名称。
 ENCODING_PCM = "PCM_S16LE"
@@ -113,12 +112,9 @@ def negotiate(requested: dict | None) -> AudioFormat:
     merged = DEFAULT_FORMAT.to_payload()
     merged.update(requested)
 
-    validator = Draft202012Validator(load_schema("audio-negotiation"))
-    errors = sorted(validator.iter_errors(merged), key=lambda error: list(error.absolute_path))
-    if errors:
-        first = errors[0]
-        field = ".".join(str(part) for part in first.absolute_path) or "(根)"
-        raise NegotiationError(f"音频格式协商失败，字段 {field}：{first.message}")
+    validator_errors = validation_errors("audio-negotiation", merged)
+    if validator_errors:
+        raise NegotiationError(f"音频格式协商失败，{validator_errors[0]}")
 
     encoding = merged["encoding"]
     opus_bit_rate = merged.get("opusBitRate") if encoding == ENCODING_OPUS else None

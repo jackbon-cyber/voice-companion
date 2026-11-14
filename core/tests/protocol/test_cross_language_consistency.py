@@ -11,9 +11,8 @@ import json
 from pathlib import Path
 
 import pytest
-from jsonschema import Draft202012Validator
 
-from core.protocol.loader import load_schema
+from core.protocol.validator import build_validator
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SAMPLES_PATH = (
@@ -35,7 +34,7 @@ def test_samples_file_exists():
 
 @pytest.mark.parametrize("sample", _samples(), ids=lambda s: f"{s['schema']}:{s['note']}")
 def test_python_validator_matches_expected_verdict(sample):
-    validator = Draft202012Validator(load_schema(sample["schema"]))
+    validator = build_validator(sample["schema"])
     assert validator.is_valid(sample["payload"]) is sample["valid"], sample["note"]
 
 
@@ -43,5 +42,5 @@ def test_python_validator_matches_expected_verdict(sample):
 def test_python_validator_rejects_invalid_samples(sample):
     if sample["valid"]:
         pytest.skip("有效样例")
-    validator = Draft202012Validator(load_schema(sample["schema"]))
+    validator = build_validator(sample["schema"])
     assert not validator.is_valid(sample["payload"])
