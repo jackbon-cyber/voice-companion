@@ -150,3 +150,21 @@ class MetricsCollector:
         self._intent = []
         self._round_trip = []
         self._first_packet = []
+
+    def samples_of(self, name: str) -> list[int]:
+        """取某个指标的原始样本。
+
+        @param name 指标标识（vad / asr / intent / round_trip / first_packet）
+        @return 样本列表；指标名未知时返回空列表
+        @throws ValueError 指标名未知时抛出
+        """
+        buckets = {
+            "vad": self._vad,
+            "asr": self._asr,
+            "intent": self._intent,
+            "round_trip": self._round_trip,
+            "first_packet": self._first_packet,
+        }
+        if name not in buckets:
+            raise ValueError(f"未知指标名：{name}")
+        return list(buckets[name])
