@@ -32,7 +32,9 @@ from core.edge.audio.negotiation import DEFAULT_FORMAT, AudioFormat
 from core.edge.audio.sentence import SentenceEvent, SentenceSegmenter
 from core.edge.audio.vad import VoiceActivityDetector
 from core.edge.degrade.policy import DegradeLevel, DegradePolicy
+from core.edge.dialog.engine import LocalDialogEngine, create_dialog_engine
 from core.edge.dialog.factual import FactualGuard
+from core.edge.dialog.responder import LocalReply, LocalResponder
 from core.edge.intent.detector import IntentDecision, IntentDetector
 from core.edge.metrics.collector import MetricsCollector
 from core.edge.session.state_machine import SessionStateMachine
@@ -131,12 +133,16 @@ class EdgeSimulator:
     #: 每轮结束后等待下行消息到达的秒数。
     DOWNLINK_DRAIN_SECONDS = 0.3
 
+    #: 本地应答的来源标识。与云端回复区分开，不得混为一谈。
+    LOCAL_REPLY_SOURCE = "LOCAL"
+
     def __init__(
         self,
         session_id: str,
         cloud_url: str,
         audio_format: AudioFormat = DEFAULT_FORMAT,
         phrases: list[str] | None = None,
+        dialog_engine: LocalDialogEngine | None = None,
     ) -> None:
         """构造模拟端。
 
@@ -144,6 +150,7 @@ class EdgeSimulator:
         @param cloud_url 云端上行地址
         @param audio_format 音频格式
         @param phrases 模拟源依次"说"出的语句
+        @param dialog_engine 本地对话引擎；为 None 时用话术库
         """
         self._session_id = session_id
         self._cloud_url = cloud_url
@@ -163,15 +170,56 @@ class EdgeSimulator:
         self._source = SimulatedAudioSource(self._phrases, audio_format)
         self._state_machine = SessionStateMachine()
         self._factual_guard = FactualGuard()
+        self._responder = LocalResponder(
+            engine=dialog_engine or create_dialog_engine(None),
+            factual_guard=self._factual_guard,
+        )
         self._clock_ms = 0
+        #: 本地应答记录。供测试断言与"本轮是否产生了本地回复"的查询。
+        self._local_replies: list[LocalReply] = []
+
+    @property
+    def local_replies(self) -> list[LocalReply]:
+        """已产生的本地应答。
+
+        @return 本地应答列表
+        """
+        return list(self._local_replies)
+
+    @property
+    def is_offline(self) -> bool:
+        """当前是否处于离线档位。
+
+        @return 离线档位时为 True
+        """
+        return self._degrade.current() in (
+            DegradeLevel.OFFLINE,
+            DegradeLevel.MINIMAL,
+        )
+
 
     async def run(self, rounds: int = 2) -> None:
         """跑若干轮对话。
 
+        云端连不上时**不抛异常**：端侧必须能独立完成陪伴应答。
+        连不上就降级到离线档，继续跑本地链路。
+
         @param rounds 轮数
         """
-        await self._client.connect(self._format)
-        await self._client.send_session_begin(self._format)
+        try:
+            await self._client.connect(self._format)
+            await self._client.send_session_begin(self._format)
+        except UplinkError as error:
+            # 连接失败 = 对端明确不可达，直接落到离线档。
+            self._degrade.record_connection_failure()
+            LOGGER.warning(
+                "云端不可达（%s），降级为 %s，转入本地陪伴模式",
+                error,
+                self._degrade.current().value,
+            )
+            await self._run_offline_rounds(rounds)
+            return
+
         LOGGER.info("已连接云端并开始会话：%s", self._cloud_url)
 
         # 下行读取放到后台任务：与上行并行，否则上行会阻塞在下行等待上。
@@ -185,6 +233,41 @@ class EdgeSimulator:
             receiver.cancel()
             await self._client.send_session_end("simulator_finished")
             await self._client.close()
+
+    async def _run_offline_rounds(self, rounds: int) -> None:
+        """在离线档位下跑若干轮本地陪伴。
+
+        离线时没有音频上行，也没有云端回复，但用户说话仍要得到回应 ——
+        否则设备在离线场景下等同于坏掉。
+
+        @param rounds 轮数
+        """
+        for round_index in range(rounds):
+            phrase = self._phrases[round_index % len(self._phrases)] if self._phrases else ""
+            if not phrase:
+                continue
+            self._clock_ms += 20
+            self._state_machine.on_user_speech_start(self._clock_ms)
+            self._state_machine.on_recognized(phrase)
+            self._state_machine.on_local_processing_started(self._clock_ms)
+
+            guard_result = self._responder.check_factual(phrase)
+            if guard_result.should_go_to_cloud:
+                # 离线时查不了事实，只能明说自己离线，不能编造。
+                reply = self._responder.respond_factual(phrase, offline=True)
+            else:
+                reply = self._responder.respond(phrase, offline=True)
+
+            self._local_replies.append(reply)
+            LOGGER.info(
+                "第 %d 轮（离线，本地产生）：识别=%r 应答=%r（情感=%s）",
+                round_index + 1,
+                phrase,
+                reply.text,
+                reply.emotion,
+            )
+            self._state_machine.on_playback_finished(self._clock_ms)
+
 
     async def _receive_downlink(self) -> None:
         """后台接收下行消息。"""
@@ -299,25 +382,63 @@ class EdgeSimulator:
 
         if not decision.handled_locally:
             self._state_machine.on_cloud_wait_started(self._clock_ms)
-            await self._send_intent_report(decision)
+            if await self._send_intent_report(decision):
+                # 上行成功，等云端回复。
+                return
+            # 上行失败且已降级到离线：不能让用户干等一个不会来的云端回复，
+            # 转为本地陪伴应答。
+            self._respond_locally(round_index, result.text)
+            self._state_machine.on_playback_finished(self._clock_ms)
             return
 
         # 本地已处理的意图**不上行**：端侧规则表已经执行完，再上行只会让云端
         # 多生成一条回复，而这条回复对应的是"我已经做完了"，
         # 用户会看到机器人答非所问地接话。
         LOGGER.info("意图在端侧本地执行，不上行")
+        self._respond_locally(round_index, result.text)
         self._state_machine.on_playback_finished(self._clock_ms)
 
-    async def _send_intent_report(self, decision: IntentDecision) -> None:
+    def _respond_locally(self, round_index: int, text: str) -> LocalReply:
+        """生成一次本地陪伴应答并记录。
+
+        事实性请求走引导话术而不是陪伴话术：陪伴话术是情绪回应，
+        用它回答"我上次血压多少"会让用户以为机器人回避了问题。
+
+        @param round_index 轮次序号
+        @param text 用户说的文本
+        @return 本地应答
+        """
+        offline = self.is_offline
+        guard_result = self._responder.check_factual(text)
+        if guard_result.should_go_to_cloud:
+            reply = self._responder.respond_factual(text, offline=offline)
+        else:
+            reply = self._responder.respond(text, offline=offline)
+        self._local_replies.append(reply)
+        LOGGER.info(
+            "第 %d 轮：本地产生应答=%r（情感=%s 离线=%s 来源=%s）",
+            round_index + 1,
+            reply.text,
+            reply.emotion,
+            reply.offline,
+            reply.source,
+        )
+        return reply
+
+    async def _send_intent_report(self, decision: IntentDecision) -> bool:
         """上行一条意图报告。
 
         @param decision 意图判定结果
+        @return 上行是否成功
         """
         try:
             await self._client.send_intent(decision)
         except UplinkError as error:
             LOGGER.warning("意图上行失败：%s", error)
             self._degrade.record_uplink_failure()
+            return False
+        self._degrade.record_uplink_success()
+        return True
 
     def degrade_level(self) -> DegradeLevel:
         """查询当前降级档位。
@@ -359,6 +480,11 @@ async def main() -> None:
         LOGGER.error("上行链路失败：%s", error)
         return
     LOGGER.info("模拟结束。降级档位：%s", simulator.degrade_level().value)
+    if simulator.local_replies:
+        LOGGER.info(
+            "本轮共产生 %d 条本地应答（来源均为 LOCAL，未伪装为云端回复）",
+            len(simulator.local_replies),
+        )
 
 
 if __name__ == "__main__":

@@ -217,21 +217,43 @@ class VendorRecognizer:
 ### 4.3 调对话策略
 
 **位置**：`core/edge/dialog/phrases.py`（话术分桶）、
+`core/edge/dialog/emotion.py`（情感判定）、
 `core/edge/dialog/factual.py`（事实性守卫）。
 
 加一类事实性请求：在 `FACTUAL_KEYWORDS` 里追加一个分类与关键词。
 **不要**在判定逻辑里加 `if` —— 那个函数是规则表驱动的，加 `if` 会让
 "加一类就改一处代码"的性质消失。
 
-### 4.4 怎么验证端侧改动
+加一类情感：在 `EMOTION_KEYWORDS` 里追加一个标签与关键词。
+同样**不要**改判定逻辑 —— `detect_emotion` 是表驱动的。
+
+**情感标签必须落在协议枚举内**：协议 `text-reply.schema.json` 的 `emotion`
+枚举只有 8 个值，新增标签要同步改 schema，否则云端会拒收该回复。
+
+### 4.4 调离线行为
+
+**位置**：`core/edge/dialog/responder.py`（`LocalResponder`）。
+
+| 行为 | 位置 |
+|---|---|
+| 本地应答的来源标记 | `LocalReply.source`，恒为 `LOCAL` |
+| 离线事实性引导话术 | `OFFLINE_FACTUAL_PHRASES` |
+
+**本地应答不得伪装成云端结果** —— 这是 `voice-edge-simulator` spec 的硬要求。
+改这条时先看 `core/tests/edge/dialog/test_responder.py` 里的断言。
+
+### 4.5 怎么验证端侧改动
 
 ```powershell
 # 单元测试
 F:\tools\python313\python.exe -m pytest core\tests\edge -v
 
-# 端到端实测
+# 端到端实测（在线）
 powershell -ExecutionPolicy Bypass -File core\scripts\start.ps1
 F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:8080/voice/uplink --rounds 3
+
+# 端到端实测（离线降级）
+F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:1/voice/uplink --rounds 2
 ```
 
 **指标采集与报告导出**（任务 5.5 已实现）：

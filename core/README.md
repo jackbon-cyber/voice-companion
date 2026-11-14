@@ -78,6 +78,24 @@ powershell -ExecutionPolicy Bypass -File core/scripts/stop.ps1
 > **回复内容是占位话术**：云端目前只回固定的两句话，
 > 真实的记忆检索与意图编排属后续阶段。
 
+### 离线也能应答
+
+云端连不上时，模拟端**不崩溃** —— 它降级到 `OFFLINE` 档，改由端侧话术库应答：
+
+```powershell
+F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:1/voice/uplink --rounds 2
+```
+
+```
+WARNING 云端不可达（上行连接建立失败：…），降级为 OFFLINE，转入本地陪伴模式
+INFO 第 1 轮（离线，本地产生）：识别='今天好难过' 应答='听你这么说，我有点心疼。'（情感=sadness）
+INFO 模拟结束。降级档位：OFFLINE
+```
+
+本地应答带 `source=LOCAL` 标记，**不会伪装成云端回复** ——
+用户在离线时听到回话，需要知道那是端侧兜底产生的。
+离线时遇到事实性请求，端侧会明说自己连不上网络，不会编造答案。
+
 ---
 
 ## 常用命令
@@ -162,7 +180,7 @@ core/
 │   ├── audio/                # 帧组装、格式协商、VAD、断句
 │   ├── asr/                  # 识别适配层与拒识
 │   ├── intent/               # 两级意图判定
-│   ├── dialog/               # 本地兜底对话与事实性守卫
+│   ├── dialog/               # 本地兜底对话、情感判定、事实性守卫、本地应答器
 │   ├── session/              # 端侧会话状态机与 barge-in 打断
 │   ├── degrade/              # 降级档位策略
 │   ├── transport/            # 上行通道、下行通道与控制通道

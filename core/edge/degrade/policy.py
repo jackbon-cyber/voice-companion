@@ -119,6 +119,21 @@ class DegradePolicy:
         """
         return self.record_uplink_failure()
 
+    def record_connection_failure(self) -> DegradeLevel:
+        """记录一次**连接建立失败**。
+
+        连接被拒绝（对方端口没在听）与"发消息失败"性质不同：
+        后者可能是单次丢包或抖动，靠累计失败次数才敢降级；
+        前者是对端**明确不可达**的证据，等三次只是白白拖延离线应答。
+        因此这里直接落到离线档。
+
+        @return 变化后的档位
+        """
+        self._failure_count = 0
+        self._success_count = 0
+        self._level = DegradeLevel.OFFLINE
+        return self._level
+
     def _step_down(self) -> DegradeLevel:
         """下降一档。
 

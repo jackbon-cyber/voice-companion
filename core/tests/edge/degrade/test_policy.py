@@ -44,3 +44,19 @@ def test_degrade_order_is_monotonic():
         DegradeLevel.OFFLINE,
         DegradeLevel.MINIMAL,
     )
+
+
+def test_connection_failure_drops_to_offline_immediately():
+    """连接被拒是对端明确不可达的证据，不该等三次失败才降级。"""
+    policy = DegradePolicy(failure_threshold=3)
+    assert policy.record_connection_failure() == DegradeLevel.OFFLINE
+
+
+def test_connection_failure_resets_counters():
+    """连接失败后计数器必须清零，否则恢复时会带着脏计数。"""
+    policy = DegradePolicy(failure_threshold=3, recovery_success_threshold=3)
+    policy.record_uplink_failure()
+    policy.record_connection_failure()
+    assert policy.record_uplink_success() == DegradeLevel.OFFLINE
+    assert policy.record_uplink_success() == DegradeLevel.OFFLINE
+    assert policy.record_uplink_success() == DegradeLevel.DEGRADED_NETWORK
