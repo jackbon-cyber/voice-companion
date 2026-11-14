@@ -28,3 +28,20 @@ def test_low_confidence_without_keyword_is_rejected():
 def test_default_rules_cover_fixed_commands():
     intents = {rule.intent for rule in DEFAULT_RULES}
     assert {"set_volume", "stop_speaking", "play_music"} <= intents
+
+
+def test_stop_keyword_does_not_match_ordinary_sentence():
+    decision = IntentDetector().detect("停下来休息一下", 0.9)
+    assert decision.intent != "stop_speaking"
+    assert decision.handled_locally is False
+
+
+def test_stop_keyword_does_not_match_negated_phrase():
+    decision = IntentDetector().detect("别停下来", 0.9)
+    assert decision.intent != "stop_speaking"
+
+
+def test_explicit_stop_command_is_recognized():
+    decision = IntentDetector().detect("别说了", 0.9)
+    assert decision.intent == "stop_speaking"
+    assert decision.handled_locally is True

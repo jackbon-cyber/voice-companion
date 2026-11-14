@@ -64,3 +64,66 @@ async def test_send_audio_frame_without_connection_is_rejected(serve_echo):
         client = UplinkClient(session_id="s-1", base_url=base_url)
         with pytest.raises(UplinkError):
             await client.send_audio_frame(b"\x01\x02", 0)
+
+
+@pytest.mark.asyncio
+async def test_final_partial_flag_is_carried_on_the_wire(serve_echo):
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        await client.send_audio_frame(b"\x01\x02", 0, is_final_partial=True)
+        await client.close()
+
+    frame = json.loads(received[0])
+    assert frame["isFinalPartial"] is True
+
+
+@pytest.mark.asyncio
+async def test_full_frame_carries_no_final_partial_flag(serve_echo):
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        await client.send_audio_frame(b"\x01\x02", 0)
+        await client.close()
+
+    frame = json.loads(received[0])
+    assert "isFinalPartial" not in frame
+
+
+@pytest.mark.asyncio
+async def test_send_frames_delivers_padded_tail_with_flag(serve_echo):
+    from core.edge.audio.framer import AudioFramer
+
+    received = []
+
+    async def handler(connection):
+        async for message in connection:
+            received.append(message)
+
+    async with serve_echo(handler) as base_url:
+        client = UplinkClient(session_id="s-1", base_url=base_url)
+        await client.connect(DEFAULT_FORMAT)
+        framer = AudioFramer(sample_rate=16000, frame_duration_ms=20)
+        framer.push(b"\x01" * 640)
+        framer.push(b"\x02" * 320)
+        await client.send_frames(framer.flush())
+        await client.close()
+
+    frame = json.loads(received[0])
+    assert frame["isFinalPartial"] is True
+    # 补齐后应为一整帧：320 采样点 × 2 字节。
+    import base64
+
+    assert len(base64.b64decode(frame["payloadBase64"])) == 640

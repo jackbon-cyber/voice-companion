@@ -17,6 +17,7 @@ from typing import Any
 from jsonschema import Draft202012Validator
 from websockets.asyncio.client import connect
 
+from core.edge.audio.framer import Frame
 from core.edge.audio.negotiation import AudioFormat
 from core.edge.intent.detector import IntentDecision
 from core.protocol.loader import load_schema
@@ -89,11 +90,17 @@ class UplinkClient:
         except Exception as error:
             raise UplinkError(f"上行重连失败：{error}") from error
 
-    async def send_audio_frame(self, payload: bytes, timestamp_ms: int) -> None:
+    async def send_audio_frame(
+        self,
+        payload: bytes,
+        timestamp_ms: int,
+        is_final_partial: bool = False,
+    ) -> None:
         """发送一帧音频。
 
-        @param payload 一帧 PCM 或 Opus 负载
+        @param payload 一帧 PCM 或 Opus 负载，必须是对齐的整帧
         @param timestamp_ms 该帧首采样点的会话内相对毫秒偏移
+        @param is_final_partial 该帧是否由不足一帧的尾部补齐而来
         @throws UplinkError 未连接、格式未协商或协议校验不通过时抛出
         """
         if self._connection is None:
@@ -108,10 +115,27 @@ class UplinkClient:
             "sampleRate": self._format.sample_rate,
             "payloadBase64": base64.b64encode(payload).decode("ascii"),
         }
+        if is_final_partial:
+            # 补齐标记必须上行：云端据此知道这一帧尾部是补出来的零，
+            # 不会把它当成真实音频参与端点检测。
+            frame["isFinalPartial"] = True
         self._validate("audio-frame", frame)
 
         self._sequence += 1
         await self._connection.send(json.dumps(frame, ensure_ascii=False))
+
+    async def send_frames(self, frames: list[Frame]) -> None:
+        """批量发送音频帧。
+
+        @param frames 待发送的帧
+        @throws UplinkError 未连接或协议校验不通过时抛出
+        """
+        for frame in frames:
+            await self.send_audio_frame(
+                frame.payload,
+                frame.timestamp_ms,
+                is_final_partial=frame.is_final_partial,
+            )
 
     async def send_intent(self, decision: IntentDecision) -> None:
         """发送一条意图判定结果。

@@ -86,6 +86,7 @@ class SentenceSegmenter:
         self._state = SentenceState.IDLE
         self._silence_ms = 0
         self._frames: list[bytes] = []
+        self._segment_emitted = False
 
     def state(self) -> SentenceState:
         """查询当前状态。
@@ -103,6 +104,8 @@ class SentenceSegmenter:
         if is_speech:
             self._silence_ms = 0
             self._state = SentenceState.SPEAKING
+            # 新一轮人声重新武装句末事件：上一句已经交付过了。
+            self._segment_emitted = False
             return SentenceEvent(EVENT_NONE)
 
         self._state = SentenceState.SILENCE
@@ -113,11 +116,14 @@ class SentenceSegmenter:
             self._frames = []
             self._silence_ms = 0
             self._state = SentenceState.IDLE
+            self._segment_emitted = False
             return SentenceEvent(EVENT_TURN_CHANGE)
 
-        if self._silence_ms >= self._end_silence_ms:
-            # 句末：把已收集的音频交出去，但静音计时继续累计，
-            # 这样后续更长的静音仍能触发换人。
+        if self._silence_ms >= self._end_silence_ms and not self._segment_emitted:
+            # 句末：把已收集的音频交出去。事件**只发一次** ——
+            # 否则一段静音里的每一帧都会触发一次 ASR，安静环境下会疯狂转写。
+            # 但静音计时继续累计，这样后续更长的静音仍能触发换人。
+            self._segment_emitted = True
             frames = self._frames
             self._frames = []
             return SentenceEvent(EVENT_SEGMENT_END, frames)

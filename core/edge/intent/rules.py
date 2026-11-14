@@ -34,7 +34,9 @@ DEFAULT_RULES: tuple[IntentRule, ...] = (
     ),
     IntentRule(
         intent="stop_speaking",
-        keywords=("停", "别说了", "闭嘴", "安静", "不要说了"),
+        # 只用多字短语，不用单字"停"：单字会命中"停下来休息""停在半路"
+        # "我想停一下"等日常表达，把闲聊当成停止指令，用户的话会直接被吞掉。
+        keywords=("别说了", "不要说了", "别说话", "停止说话", "闭嘴", "安静", "别念了"),
     ),
     IntentRule(
         intent="play_music",
