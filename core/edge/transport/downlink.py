@@ -133,6 +133,14 @@ class DownlinkClient:
         return reply
 
     def first_packet_latency_ms(self, request_sent_at_ms: int) -> int | None:
+        """取首包延迟。
+
+        以**语音首包**为准（``first_chunk_at_ms``）——
+        文本回复没有"首包"的概念，它是完整的一条消息。
+
+        @param request_sent_at_ms 请求发出时刻（毫秒）
+        @return 首包延迟（毫秒）；还没有语音首包时返回 None
+        """
         if self._state.first_chunk_at_ms is None:
             return None
         return self._state.first_chunk_at_ms - request_sent_at_ms

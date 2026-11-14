@@ -44,6 +44,9 @@
 | `JAVA_HOME` | 是 | `F:\tools\jdk21\jdk-21.0.13+9` | JDK 21 路径 | 用 JDK 17 编译失败（class file 61.0 vs 65.0） |
 | `VOICE_CHROMA_BASE_URL` | 否 | `http://127.0.0.1:8765` | ChromaDB 地址 | 云端启动时连通性检查失败 |
 | `VOICE_CHROMA_DATA_PATH` | 否 | `data/chroma` | ChromaDB 数据目录 | 数据落在默认位置 |
+| `VOICE_UPLINK_TOKEN` | **生产必填** | 空 | 上行通道接入凭据 | **不启用鉴权，任何客户端都能接入上行通道** |
+| `VOICE_SESSION_HEARTBEAT_TIMEOUT_MS` | 否 | `90000` | 心跳超时阈值（毫秒） | 端侧断网后会话长时间不被回收，占住处理单元内存 |
+| `VOICE_SESSION_SCAN_INTERVAL_MS` | 否 | `30000` | 会话扫描间隔（毫秒） | 超时回收的检测延迟变大 |
 | `VOICE_LLM_BASE_URL` | 否 | 空 | 大模型服务地址 | 云端走降级路径（当前阶段本来就没接） |
 | `VOICE_LLM_API_KEY` | 否 | 空 | 大模型 API Key | 同上 |
 | `VOICE_MQTT_HOST` | 否 | `127.0.0.1` | MQTT Broker 地址 | 控制通道不可用 |
@@ -53,7 +56,12 @@
 
 ```powershell
 [Environment]::SetEnvironmentVariable('VOICE_CHROMA_BASE_URL', 'http://127.0.0.1:8765', 'User')
+[Environment]::SetEnvironmentVariable('VOICE_UPLINK_TOKEN', '<你的接入凭据>', 'User')
 ```
+
+> **`VOICE_UPLINK_TOKEN` 未设置时上行通道不鉴权。** 这是开发期的默认形态，
+> 让"克隆下来就能跑"成立；生产部署**必须**设置，否则任何客户端都能接入上行通道。
+> 凭据通过请求头 `Authorization: Bearer <token>` 传递，也支持查询参数 `?token=`。
 
 ---
 

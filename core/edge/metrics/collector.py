@@ -22,19 +22,39 @@ MIN_SAMPLE_COUNT = 100
 # 默认百分位。
 DEFAULT_PERCENTILE = 0.95
 
+# 微秒转毫秒的缩放因子。
+MICROS_PER_MILLI = 1000
+
+
+def _micros_to_millis(micros: int) -> float:
+    """把微秒折算成毫秒，保留一位小数的精度。
+
+    按整数取整会让几十微秒的操作全部变成 0 —— 报告里一排 0 没有任何信息量，
+    还会让人误以为"这一步不耗时"。
+    这里保留到 0.1 毫秒：再细的精度对"这步慢不慢"这个问题没有意义，
+    而浮点数带来的显示噪声用一位小数即可控住。
+
+    @param micros 耗时（微秒）
+    @return 耗时（毫秒，保留一位小数）
+    """
+    return round(micros / MICROS_PER_MILLI, 1)
+
 
 @dataclass(frozen=True)
 class TurnTimings:
     """一轮对话的分段耗时快照。
 
     各字段为对应指标的中位数（毫秒），无样本时为 0。
+
+    字段类型为浮点：亚毫秒级的操作（VAD、意图判定）按毫秒取整会全部变成 0，
+    报告里一排 0 既没有信息量，又会让人误以为"这一步不耗时"。
     """
 
-    vad_ms: int = 0
-    asr_ms: int = 0
-    intent_ms: int = 0
-    round_trip_ms: int = 0
-    first_packet_ms: int = 0
+    vad_ms: float = 0
+    asr_ms: float = 0
+    intent_ms: float = 0
+    round_trip_ms: float = 0
+    first_packet_ms: float = 0
 
     #: 各指标的样本数。门禁脚本据此判断**哪个指标**样本不足。
     sample_counts: Mapping[str, int] = field(default_factory=dict)
@@ -44,7 +64,7 @@ class TurnTimings:
     sample_count: int = 0
 
 
-def percentile(values: list[int], q: float = DEFAULT_PERCENTILE) -> int:
+def percentile(values: list[float], q: float = DEFAULT_PERCENTILE) -> float:
     """按最近秩法计算百分位。
 
     @param values 样本列表
@@ -67,11 +87,11 @@ class MetricsCollector:
 
     def __init__(self) -> None:
         """构造采集器。"""
-        self._vad: list[int] = []
-        self._asr: list[int] = []
-        self._intent: list[int] = []
-        self._round_trip: list[int] = []
-        self._first_packet: list[int] = []
+        self._vad: list[float] = []
+        self._asr: list[float] = []
+        self._intent: list[float] = []
+        self._round_trip: list[float] = []
+        self._first_packet: list[float] = []
 
     def record_vad(self, ms: int) -> None:
         """记录一次 VAD 耗时。
@@ -107,6 +127,33 @@ class MetricsCollector:
         @param ms 耗时（毫秒）
         """
         self._first_packet.append(ms)
+
+    def record_vad_micros(self, micros: int) -> None:
+        """记录一次 VAD 耗时（微秒）。
+
+        **为什么需要微秒入口**：VAD、意图判定这类操作在 PC 上只花几十微秒。
+        按毫秒取整会让它们**全部变成 0** —— 报告里一排 0 没有任何信息量，
+        还会让人误以为"这一步不耗时"。
+        累计用微秒、报告时才折算成毫秒（保留一位小数），
+        既不丢信息，报告又仍然以毫秒为单位。
+
+        @param micros 耗时（微秒）
+        """
+        self._vad.append(_micros_to_millis(micros))
+
+    def record_asr_micros(self, micros: int) -> None:
+        """记录一次识别耗时（微秒）。
+
+        @param micros 耗时（微秒）
+        """
+        self._asr.append(_micros_to_millis(micros))
+
+    def record_intent_micros(self, micros: int) -> None:
+        """记录一次意图判定耗时（微秒）。
+
+        @param micros 耗时（微秒）
+        """
+        self._intent.append(_micros_to_millis(micros))
 
     def snapshot(self) -> TurnTimings:
         """生成快照。
@@ -151,7 +198,7 @@ class MetricsCollector:
         self._round_trip = []
         self._first_packet = []
 
-    def samples_of(self, name: str) -> list[int]:
+    def samples_of(self, name: str) -> list[float]:
         """取某个指标的原始样本。
 
         @param name 指标标识（vad / asr / intent / round_trip / first_packet）

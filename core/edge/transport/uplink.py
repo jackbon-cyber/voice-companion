@@ -30,17 +30,28 @@ class UplinkError(RuntimeError):
     """
 
 
+class UplinkAuthError(UplinkError):
+    """上行通道鉴权失败。
+
+    与普通的 {@link UplinkError} 分开：鉴权失败是**配置问题**（凭据缺失或错误），
+    不是网络问题。两者要分开处理 —— 网络断了可以降级到本地陪伴继续跑，
+    而凭据错了必须让人知道"去改配置"，静默降级会把配置错误伪装成网络故障。
+    """
+
+
 class UplinkClient:
     """端侧上行通道客户端。"""
 
-    def __init__(self, session_id: str, base_url: str) -> None:
+    def __init__(self, session_id: str, base_url: str, token: str | None = None) -> None:
         """构造上行客户端。
 
         @param session_id 会话标识。**重连时必须保持不变**，否则云端会当作新会话。
         @param base_url WebSocket 服务地址
+        @param token 接入凭据；为 None 时不带凭据（云端未启用鉴权时用）
         """
         self._session_id = session_id
         self._base_url = base_url
+        self._token = token
         self._sequence = 0
         self._format: AudioFormat | None = None
         self._connection: Any = None
@@ -66,13 +77,14 @@ class UplinkClient:
         """建立上行连接并协商音频格式。
 
         @param audio_format 协商好的音频格式
-        @throws UplinkError 连接失败时抛出
+        @throws UplinkAuthError 鉴权失败（握手被拒）时抛出
+        @throws UplinkError 其他连接失败时抛出
         """
         self._format = audio_format
         try:
-            self._connection = await connect(self._base_url)
+            self._connection = await connect(self._base_url, additional_headers=self._auth_headers())
         except Exception as error:
-            raise UplinkError(f"上行连接建立失败：{error}") from error
+            raise self._classify_connect_error(error) from error
 
     async def reconnect(self, audio_format: AudioFormat | None = None) -> None:
         """重连，保留会话标识与序号。
@@ -81,15 +93,67 @@ class UplinkClient:
         上下文接上，而不是当作一次全新的对话。
 
         @param audio_format 音频格式；为 None 时沿用上次协商结果
-        @throws UplinkError 重连失败时抛出
+        @throws UplinkAuthError 鉴权失败（握手被拒）时抛出
+        @throws UplinkError 其他连接失败时抛出
         """
         if audio_format is not None:
             self._format = audio_format
         await self.close()
         try:
-            self._connection = await connect(self._base_url)
+            self._connection = await connect(self._base_url, additional_headers=self._auth_headers())
         except Exception as error:
-            raise UplinkError(f"上行重连失败：{error}") from error
+            raise self._classify_connect_error(error) from error
+
+    def _classify_connect_error(self, error: Exception) -> UplinkError:
+        """把连接异常分类成鉴权失败或普通连接失败。
+
+        握手阶段被拒（HTTP 401 / 403）与"连不上"是两类问题：
+        前者是凭据错，后者是网络不通。混为一谈会让配置错误被当成网络抖动，
+        排查方向完全跑偏。
+
+        @param error 原始异常
+        @return 分类后的异常
+        """
+        status = self._handshake_status(error)
+        if status in (401, 403):
+            return UplinkAuthError(
+                f"上行鉴权失败（HTTP {status}）：请检查 VOICE_UPLINK_TOKEN 是否正确"
+            )
+        return UplinkError(f"上行连接建立失败：{error}")
+
+    def _handshake_status(self, error: Exception) -> int | None:
+        """从握手异常里取 HTTP 状态码。
+
+        websockets 15 的 {@code InvalidStatus} 把响应对象放在 {@code args[0]}，
+        没有 {@code response} 属性；更早的版本用 {@code response}。
+        两种形态都要认，否则升级 websockets 就会让鉴权失败被误判成网络失败。
+
+        @param error 原始异常
+        @return 状态码；取不到时返回 None
+        """
+        response = getattr(error, "response", None)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int):
+            return status
+
+        for argument in getattr(error, "args", ()):
+            status = getattr(argument, "status_code", None)
+            if isinstance(status, int):
+                return status
+        return None
+
+    def _auth_headers(self) -> dict[str, str]:
+        """构造鉴权请求头。
+
+        凭据走请求头而不是查询参数：URL 会被记录进访问日志与代理日志，
+        而请求头默认不会。查询参数形式只留给浏览器端（其 WebSocket API
+        不能自定义请求头）。
+
+        @return 请求头；无凭据时返回空字典
+        """
+        if not self._token:
+            return {}
+        return {"Authorization": f"Bearer {self._token}"}
 
     async def send_audio_frame(
         self,

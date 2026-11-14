@@ -8,6 +8,15 @@ spring:
     default-property-inclusion: non_null
 
 voice:
+  session:
+    # 心跳超时阈值（毫秒）。端侧超过这么久没心跳即判定失联并回收会话。
+    heartbeat-timeout-ms: ${VOICE_SESSION_HEARTBEAT_TIMEOUT_MS:90000}
+    # 会话扫描间隔（毫秒）。与超时阈值解耦：前者是运维成本，后者是业务容忍度。
+    scan-interval-ms: ${VOICE_SESSION_SCAN_INTERVAL_MS:30000}
+  uplink:
+    # 上行通道凭据。一律走环境变量，仓库内不出现真实值。
+    # 未设置时不启用鉴权（开发期默认形态）；生产部署必须设置。
+    token: ${VOICE_UPLINK_TOKEN:}
   chroma:
     # ChromaDB 服务地址。默认与本地脚本启动的实例一致。
     base-url: ${VOICE_CHROMA_BASE_URL:http://127.0.0.1:8765}

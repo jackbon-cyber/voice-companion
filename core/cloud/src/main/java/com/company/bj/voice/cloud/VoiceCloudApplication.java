@@ -2,11 +2,13 @@ package com.company.bj.voice.cloud;
 
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.scheduling.annotation.EnableScheduling;
 
 /**
  * 语音陪伴机器人云端服务入口。
  */
 @SpringBootApplication
+@EnableScheduling
 public class VoiceCloudApplication {
 
     /**

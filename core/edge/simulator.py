@@ -23,6 +23,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import platform
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -37,9 +40,10 @@ from core.edge.dialog.factual import FactualGuard
 from core.edge.dialog.responder import LocalReply, LocalResponder
 from core.edge.intent.detector import IntentDecision, IntentDetector
 from core.edge.metrics.collector import MetricsCollector
+from core.edge.metrics.reporter import MetricsReporter
 from core.edge.session.state_machine import SessionStateMachine
 from core.edge.transport.downlink import TextReply, VoiceChunk
-from core.edge.transport.uplink import UplinkClient, UplinkError
+from core.edge.transport.uplink import UplinkAuthError, UplinkClient, UplinkError
 
 # 日志器。
 LOGGER = logging.getLogger(__name__)
@@ -52,6 +56,20 @@ DEFAULT_SESSION_ID = "session-local-1"
 
 # 模拟源的默认间隔（毫秒）。真实场景是 20 毫秒一帧，这里放慢便于观察。
 DEFAULT_SOURCE_INTERVAL_MS = 200
+
+
+def _elapsed_micros(started_at: float) -> int:
+    """计算从给定时刻起经过的微秒数。
+
+    用单调时钟而非墙钟：墙钟会被 NTP 校时与系统时间调整影响，
+    测出的耗时会突然出现负数或巨大的跳变。
+
+    返回微秒而非毫秒：VAD 与意图判定只花几十微秒，按毫秒取整会全部变成 0。
+
+    @param started_at 起始时刻（``time.perf_counter`` 的返回值）
+    @return 经过的微秒数
+    """
+    return int((time.perf_counter() - started_at) * 1_000_000)
 
 
 class SimulatedAudioSource:
@@ -143,6 +161,7 @@ class EdgeSimulator:
         audio_format: AudioFormat = DEFAULT_FORMAT,
         phrases: list[str] | None = None,
         dialog_engine: LocalDialogEngine | None = None,
+        token: str | None = None,
     ) -> None:
         """构造模拟端。
 
@@ -151,12 +170,13 @@ class EdgeSimulator:
         @param audio_format 音频格式
         @param phrases 模拟源依次"说"出的语句
         @param dialog_engine 本地对话引擎；为 None 时用话术库
+        @param token 接入凭据；为 None 时不带凭据
         """
         self._session_id = session_id
         self._cloud_url = cloud_url
         self._format = audio_format
         self._phrases = phrases or ["把音量调到五十", "今天发生了好多事情啊"]
-        self._client = UplinkClient(session_id=session_id, base_url=cloud_url)
+        self._client = UplinkClient(session_id=session_id, base_url=cloud_url, token=token)
         self._vad = VoiceActivityDetector()
         self._segmenter = SentenceSegmenter(
             end_silence_ms=600,
@@ -177,6 +197,16 @@ class EdgeSimulator:
         self._clock_ms = 0
         #: 本地应答记录。供测试断言与"本轮是否产生了本地回复"的查询。
         self._local_replies: list[LocalReply] = []
+        #: 最近一次上行请求发出的时刻（单调时钟）。为 None 表示当前没有在等下行。
+        self._request_sent_at: float | None = None
+
+    @property
+    def metrics(self) -> MetricsCollector:
+        """分段耗时采集器。
+
+        @return 采集器
+        """
+        return self._metrics
 
     @property
     def local_replies(self) -> list[LocalReply]:
@@ -209,6 +239,12 @@ class EdgeSimulator:
         try:
             await self._client.connect(self._format)
             await self._client.send_session_begin(self._format)
+        except UplinkAuthError as error:
+            # 鉴权失败是**配置问题**，不是网络问题。
+            # 静默降级到本地陪伴会把"凭据错了"伪装成"网络断了"，
+            # 让人往错误的方向排查。这里明确报出来并中止。
+            LOGGER.error("上行鉴权失败：%s", error)
+            raise
         except UplinkError as error:
             # 连接失败 = 对端明确不可达，直接落到离线档。
             self._degrade.record_connection_failure()
@@ -290,6 +326,11 @@ class EdgeSimulator:
         """
         if isinstance(message, TextReply):
             LOGGER.info("收到云端回复：%r（情感=%s）", message.text, message.emotion)
+            # 文本回复也是用户感知的"开始响应"时刻。
+            # 首包延迟若只在语音片段上统计，云端只发文本时就永远没有样本 ——
+            # 而指标缺失会被报告标成"未覆盖"，白白丢掉一个真实可测的量。
+            self._record_first_packet()
+            self._record_round_trip()
             self._state_machine.on_playback_finished(self._clock_ms)
         elif isinstance(message, VoiceChunk):
             latency = self._client.downlink.first_packet_latency_ms(0)
@@ -300,7 +341,10 @@ class EdgeSimulator:
                 message.is_last,
                 latency,
             )
+            if latency is not None:
+                self._metrics.record_first_packet(latency)
             if message.is_last:
+                self._record_round_trip()
                 self._state_machine.on_playback_finished(self._clock_ms)
 
     async def _drain_downlink(self) -> None:
@@ -319,7 +363,10 @@ class EdgeSimulator:
         speech_started = False
 
         for frame in frames:
+            vad_started = time.perf_counter()
             is_speech = self._vad.is_speech_frame(frame.payload)
+            self._metrics.record_vad_micros(_elapsed_micros(vad_started))
+
             await self._client.send_frames([frame])
             # 收集该帧音频，断句到句末时一并交给识别。
             self._segmenter.push_frame(frame.payload)
@@ -337,13 +384,38 @@ class EdgeSimulator:
             elif event.kind == "turn_change":
                 LOGGER.info("检测到换人，本轮输入作废")
 
+    def _record_round_trip(self) -> None:
+        """记录一次上云往返耗时。
+
+        往返耗时从**上行发出**算到**下行到达**，不含端侧本地处理 ——
+        本地处理另有 VAD/识别/意图三个指标单独统计。
+        两者混在一起会让人分不清"慢在本地"还是"慢在网络"。
+        """
+        if self._request_sent_at is None:
+            return
+        self._metrics.record_round_trip(_elapsed_micros(self._request_sent_at) / 1000)
+        self._request_sent_at = None
+
+    def _record_first_packet(self) -> None:
+        """记录一次首包延迟。
+
+        首包延迟与往返耗时的区别：**首包**是用户感知的"开始响应"时刻，
+        **往返**是整条回复到达的时刻。第一阶段云端只发一条完整文本回复，
+        两者数值接近；接入流式 TTS 后首包会显著小于往返。
+        """
+        if self._request_sent_at is None:
+            return
+        self._metrics.record_first_packet(_elapsed_micros(self._request_sent_at) / 1000)
+
     async def _handle_segment(self, round_index: int, frames: list[bytes]) -> None:
         """处理一个语句段。
 
         @param round_index 轮次序号
         @param frames 该段的音频字节
         """
+        asr_started = time.perf_counter()
         result: RecognitionResult = self._recognizer.transcribe(b"".join(frames))
+        self._metrics.record_asr_micros(_elapsed_micros(asr_started))
 
         if not is_confident(result):
             LOGGER.info("第 %d 轮：识别不可信（%r），拒识不上云", round_index + 1, result.text)
@@ -353,6 +425,7 @@ class EdgeSimulator:
         self._state_machine.on_local_processing_started(self._clock_ms)
 
         # 事实性请求先过守卫：端侧不得编造具体事实，只能引导上云求证。
+        guard_started = time.perf_counter()
         guard_result = self._factual_guard.check(result.text)
         if guard_result.should_go_to_cloud:
             LOGGER.info(
@@ -371,7 +444,9 @@ class EdgeSimulator:
             )
             return
 
+        intent_started = time.perf_counter()
         decision = self._intent.detect(result.text, result.confidence)
+        self._metrics.record_intent_micros(_elapsed_micros(intent_started))
         LOGGER.info(
             "第 %d 轮：识别=%r 意图=%s 本地处理=%s",
             round_index + 1,
@@ -438,6 +513,8 @@ class EdgeSimulator:
             self._degrade.record_uplink_failure()
             return False
         self._degrade.record_uplink_success()
+        # 记录发出时刻：往返耗时从此刻算到下行到达。
+        self._request_sent_at = time.perf_counter()
         return True
 
     def degrade_level(self) -> DegradeLevel:
@@ -458,6 +535,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", default=DEFAULT_SESSION_ID, help="会话标识")
     parser.add_argument("--rounds", type=int, default=2, help="对话轮数")
     parser.add_argument("--phrase", action="append", default=None, help="模拟说出的语句，可重复")
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("VOICE_UPLINK_TOKEN"),
+        help="接入凭据。默认取环境变量 VOICE_UPLINK_TOKEN。",
+    )
+    parser.add_argument(
+        "--metrics-out",
+        default=None,
+        help="把分段耗时报告导出到指定路径（Markdown）。",
+    )
+    parser.add_argument(
+        "--metrics-json-out",
+        default=None,
+        help="把分段耗时报告导出到指定路径（JSON）。",
+    )
     return parser
 
 
@@ -473,9 +565,14 @@ async def main() -> None:
         session_id=args.session,
         cloud_url=args.url,
         phrases=args.phrase,
+        token=args.token,
     )
     try:
         await simulator.run(rounds=args.rounds)
+    except UplinkAuthError as error:
+        # 鉴权失败退出码用 2，与"网络不可达降级继续跑"（退出码 0）区分开。
+        LOGGER.error("上行鉴权失败：%s", error)
+        raise SystemExit(2)
     except UplinkError as error:
         LOGGER.error("上行链路失败：%s", error)
         return
@@ -485,6 +582,33 @@ async def main() -> None:
             "本轮共产生 %d 条本地应答（来源均为 LOCAL，未伪装为云端回复）",
             len(simulator.local_replies),
         )
+    _export_metrics(simulator, args)
+
+
+def _export_metrics(simulator: EdgeSimulator, args: argparse.Namespace) -> None:
+    """导出分段耗时报告。
+
+    @param simulator 模拟端
+    @param args 命令行参数
+    """
+    if not args.metrics_out and not args.metrics_json_out:
+        return
+
+    reporter = MetricsReporter(simulator.metrics)
+    environment = {
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "rounds": str(args.rounds),
+        "degradeLevel": simulator.degrade_level().value,
+    }
+    if args.metrics_out:
+        path = Path(args.metrics_out)
+        reporter.export_markdown(path, environment)
+        LOGGER.info("分段耗时报告已导出：%s", path)
+    if args.metrics_json_out:
+        path = Path(args.metrics_json_out)
+        reporter.export_json(path, environment)
+        LOGGER.info("分段耗时报告已导出：%s", path)
 
 
 if __name__ == "__main__":

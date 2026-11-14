@@ -49,9 +49,9 @@ class MetricReport:
     #: 样本数。
     sample_count: int
     #: 中位数。
-    median_ms: int
+    median_ms: float
     #: 百分位（默认 P95）。
-    percentile_ms: int
+    percentile_ms: float
     #: 使用的分位。
     percentile_q: float
     #: 样本是否充足（达到 ``MIN_SAMPLE_COUNT``）。
@@ -191,7 +191,7 @@ class MetricsReporter:
             environment=dict(environment or {}),
         )
 
-    def _percentile_of(self, name: str) -> int:
+    def _percentile_of(self, name: str) -> float:
         """取单个指标的百分位。
 
         @param name 指标标识
