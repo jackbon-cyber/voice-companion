@@ -32,8 +32,10 @@ from core.edge.audio.negotiation import DEFAULT_FORMAT, AudioFormat
 from core.edge.audio.sentence import SentenceEvent, SentenceSegmenter
 from core.edge.audio.vad import VoiceActivityDetector
 from core.edge.degrade.policy import DegradeLevel, DegradePolicy
-from core.edge.intent.detector import IntentDetector
+from core.edge.dialog.factual import FactualGuard
+from core.edge.intent.detector import IntentDecision, IntentDetector
 from core.edge.metrics.collector import MetricsCollector
+from core.edge.session.state_machine import SessionStateMachine
 from core.edge.transport.uplink import UplinkClient, UplinkError
 
 # 日志器。
@@ -155,6 +157,9 @@ class EdgeSimulator:
         self._degrade = DegradePolicy()
         self._metrics = MetricsCollector()
         self._source = SimulatedAudioSource(self._phrases, audio_format)
+        self._state_machine = SessionStateMachine()
+        self._factual_guard = FactualGuard()
+        self._clock_ms = 0
 
     async def run(self, rounds: int = 2) -> None:
         """跑若干轮对话。
@@ -178,12 +183,20 @@ class EdgeSimulator:
         @param round_index 轮次序号
         """
         frames = await self._source.frames()
+        speech_started = False
 
         for frame in frames:
             is_speech = self._vad.is_speech_frame(frame.payload)
             await self._client.send_frames([frame])
             # 收集该帧音频，断句到句末时一并交给识别。
             self._segmenter.push_frame(frame.payload)
+
+            if is_speech and not speech_started:
+                speech_started = True
+                self._clock_ms += 20
+                barge_in = self._state_machine.on_user_speech_start(self._clock_ms)
+                if barge_in is not None:
+                    LOGGER.info("检测到打断，丢弃 %d 字节待播音频", barge_in.discarded_audio_bytes)
 
             event = self._segmenter.feed(is_speech)
             if event.kind == "segment_end":
@@ -203,6 +216,22 @@ class EdgeSimulator:
             LOGGER.info("第 %d 轮：识别不可信（%r），拒识不上云", round_index + 1, result.text)
             return
 
+        self._state_machine.on_recognized(result.text)
+        self._state_machine.on_local_processing_started(self._clock_ms)
+
+        # 事实性请求先过守卫：端侧不得编造具体事实，只能引导上云求证。
+        guard_result = self._factual_guard.check(result.text)
+        if guard_result.should_go_to_cloud:
+            LOGGER.info(
+                "第 %d 轮：识别=%r 属事实性请求（%s），引导上云求证，不在端侧作答",
+                round_index + 1,
+                result.text,
+                guard_result.category.value if guard_result.category else "未知",
+            )
+            self._state_machine.on_cloud_wait_started(self._clock_ms)
+            await self._send_intent_report(round_index, "unknown", result.confidence)
+            return
+
         decision = self._intent.detect(result.text, result.confidence)
         LOGGER.info(
             "第 %d 轮：识别=%r 意图=%s 本地处理=%s",
@@ -212,6 +241,9 @@ class EdgeSimulator:
             decision.handled_locally,
         )
 
+        if not decision.handled_locally:
+            self._state_machine.on_cloud_wait_started(self._clock_ms)
+
         try:
             await self._client.send_intent(decision)
         except UplinkError as error:
@@ -220,6 +252,26 @@ class EdgeSimulator:
 
         if decision.handled_locally:
             LOGGER.info("意图在端侧本地执行，无需上云")
+
+    async def _send_intent_report(
+        self, round_index: int, intent: str, confidence: float
+    ) -> None:
+        """上行一条意图报告。
+
+        @param round_index 轮次序号
+        @param intent 意图标识
+        @param confidence 置信度
+        """
+        decision = IntentDecision(
+            intent=intent,
+            confidence=confidence,
+            handled_locally=False,
+        )
+        try:
+            await self._client.send_intent(decision)
+        except UplinkError as error:
+            LOGGER.warning("意图上行失败：%s", error)
+            self._degrade.record_uplink_failure()
 
     def degrade_level(self) -> DegradeLevel:
         """查询当前降级档位。
