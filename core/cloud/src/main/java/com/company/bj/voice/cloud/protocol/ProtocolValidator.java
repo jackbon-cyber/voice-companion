@@ -7,8 +7,8 @@ import com.networknt.schema.JsonSchemaFactory;
 import com.networknt.schema.SchemaValidatorsConfig;
 import com.networknt.schema.SpecVersion.VersionFlag;
 import com.networknt.schema.ValidationMessage;
-import java.io.IOException;
-import java.io.UncheckedIOException;
+import com.networknt.schema.resource.SchemaMappers;
+import java.io.IOException;import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -26,6 +26,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * <p>schema 按名称缓存，避免每条消息都重新读盘解析。
  */
 public class ProtocolValidator {
+
+    /** 协议 schema 的 URI 前缀。 */
+    private static final String SCHEMA_URI_PREFIX = "https://voice-companion/protocol/";
 
     /** schema 名到已编译 schema 的缓存。 */
     private final Map<String, JsonSchema> schemaCache = new ConcurrentHashMap<>();
@@ -90,12 +93,29 @@ public class ProtocolValidator {
         }
         try {
             String content = Files.readString(schemaPath);
-            JsonSchemaFactory factory = JsonSchemaFactory.getInstance(VersionFlag.V202012);
+            JsonSchemaFactory factory = buildSchemaFactory();
             SchemaValidatorsConfig config = SchemaValidatorsConfig.builder().build();
             return factory.getSchema(content, config);
         } catch (IOException error) {
             throw new UncheckedIOException("读取协议 schema 失败：" + schemaPath, error);
         }
+    }
+
+    /**
+     * 构建 schema 工厂。
+     *
+     * <p>协议 schema 之间存在相对引用（例如 {@code session.schema.json} 引用
+     * {@code audio-negotiation.schema.json}）。默认行为是把这些相对引用当成
+     * 远程 URL 去下载，既慢又会打网络。这里把协议域名映射到本地目录，
+     * 让引用在本地解析。
+     *
+     * @return schema 工厂
+     */
+    private JsonSchemaFactory buildSchemaFactory() {
+        String localPrefix = schemaDirectory.toUri().toString();
+        return JsonSchemaFactory.getInstance(
+                VersionFlag.V202012,
+                builder -> builder.schemaMappers(mappers -> mappers.mapPrefix(SCHEMA_URI_PREFIX, localPrefix)));
     }
 
     private String describe(ValidationMessage message) {

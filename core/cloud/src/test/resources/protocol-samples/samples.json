@@ -1,0 +1,213 @@
+{
+  "samples": [
+    {
+      "schema": "audio-frame",
+      "valid": true,
+      "note": "完整音频帧",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 0,
+        "timestampMs": 0,
+        "sampleRate": 16000,
+        "payloadBase64": "AAA="
+      }
+    },
+    {
+      "schema": "audio-frame",
+      "valid": false,
+      "note": "缺少 sessionId",
+      "payload": {
+        "sequence": 0,
+        "timestampMs": 0,
+        "sampleRate": 16000,
+        "payloadBase64": "AAA="
+      }
+    },
+    {
+      "schema": "audio-frame",
+      "valid": false,
+      "note": "payloadBase64 不是字符串",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 0,
+        "timestampMs": 0,
+        "sampleRate": 16000,
+        "payloadBase64": 123
+      }
+    },
+    {
+      "schema": "voice-chunk",
+      "valid": true,
+      "note": "带首片段标记",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 0,
+        "payloadBase64": "AAA=",
+        "isFirst": true
+      }
+    },
+    {
+      "schema": "voice-chunk",
+      "valid": false,
+      "note": "缺少 sessionId",
+      "payload": {
+        "sequence": 0,
+        "payloadBase64": "AAA="
+      }
+    },
+    {
+      "schema": "text-reply",
+      "valid": true,
+      "note": "正常文本回复",
+      "payload": {
+        "sessionId": "s1",
+        "text": "今天过得怎么样",
+        "emotion": "tenderness"
+      }
+    },
+    {
+      "schema": "text-reply",
+      "valid": false,
+      "note": "情感标签不在集合内",
+      "payload": {
+        "sessionId": "s1",
+        "text": "今天过得怎么样",
+        "emotion": "melancholy"
+      }
+    },
+    {
+      "schema": "session",
+      "valid": true,
+      "note": "会话开始",
+      "payload": {
+        "sessionId": "s1",
+        "type": "begin"
+      }
+    },
+    {
+      "schema": "session",
+      "valid": false,
+      "note": "type 非法",
+      "payload": {
+        "sessionId": "s1",
+        "type": "started"
+      }
+    },
+    {
+      "schema": "session",
+      "valid": false,
+      "note": "type=end 缺少 reason",
+      "payload": {
+        "sessionId": "s1",
+        "type": "end"
+      }
+    },
+    {
+      "schema": "audio-negotiation",
+      "valid": true,
+      "note": "PCM 默认格式",
+      "payload": {
+        "sampleRate": 16000,
+        "channels": 1,
+        "bitDepth": 16,
+        "encoding": "PCM_S16LE",
+        "frameDurationMs": 20
+      }
+    },
+    {
+      "schema": "audio-negotiation",
+      "valid": false,
+      "note": "采样率不在枚举内",
+      "payload": {
+        "sampleRate": 44100,
+        "channels": 1,
+        "bitDepth": 16,
+        "encoding": "PCM_S16LE",
+        "frameDurationMs": 20
+      }
+    },
+    {
+      "schema": "audio-negotiation",
+      "valid": true,
+      "note": "Opus 带码率",
+      "payload": {
+        "sampleRate": 16000,
+        "channels": 1,
+        "bitDepth": 16,
+        "encoding": "OPUS",
+        "frameDurationMs": 20,
+        "opusBitRate": 24000
+      }
+    },
+    {
+      "schema": "audio-negotiation",
+      "valid": false,
+      "note": "Opus 缺 opusBitRate",
+      "payload": {
+        "sampleRate": 16000,
+        "channels": 1,
+        "bitDepth": 16,
+        "encoding": "OPUS",
+        "frameDurationMs": 20
+      }
+    },
+    {
+      "schema": "degrade-level",
+      "valid": true,
+      "note": "离线档位",
+      "payload": {
+        "level": "OFFLINE"
+      }
+    },
+    {
+      "schema": "degrade-level",
+      "valid": false,
+      "note": "档位小写非法",
+      "payload": {
+        "level": "offline"
+      }
+    },
+    {
+      "schema": "control-channel",
+      "valid": true,
+      "note": "下行画像增量",
+      "payload": {
+        "sessionId": "s1",
+        "direction": "down",
+        "type": "profileDelta",
+        "payloadBytes": 128
+      }
+    },
+    {
+      "schema": "control-channel",
+      "valid": false,
+      "note": "画像增量超过 8192 上限",
+      "payload": {
+        "sessionId": "s1",
+        "direction": "down",
+        "type": "profileDelta",
+        "payloadBytes": 8193
+      }
+    },
+    {
+      "schema": "control-channel",
+      "valid": true,
+      "note": "上行状态上报",
+      "payload": {
+        "sessionId": "s1",
+        "direction": "up",
+        "type": "statusReport"
+      }
+    },
+    {
+      "schema": "control-channel",
+      "valid": false,
+      "note": "direction 非法",
+      "payload": {
+        "sessionId": "s1",
+        "direction": "both",
+        "type": "statusReport"
+      }
+    }
+  ]
+}
