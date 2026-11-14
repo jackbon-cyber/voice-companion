@@ -4,7 +4,8 @@
 检索记忆、给出有情感温度的回应。
 
 > **当前阶段：第一阶段（协议契约 + 链路骨架）已完成。**
-> 已实测打通**上行链路**（端侧 → 云端）；下行（机器人回话）尚未实现。
+> 已实测打通**双向链路**（端侧 ↔ 云端，机器人会回话）。
+> 但云端回复内容目前是**占位话术**，真实回复需意图判定与记忆装配。
 > 完整边界见 [`docs/known-limitations.md`](docs/known-limitations.md)。
 
 ---
@@ -41,9 +42,11 @@ powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
 ```
 已连接云端并开始会话：ws://127.0.0.1:8080/voice/uplink
 第 1 轮：识别='把音量调到五十' 意图=set_volume 本地处理=True
-意图在端侧本地执行，无需上云
-第 2 轮：识别='今天天气怎么样' 属事实性请求（REALTIME_FACT），引导上云求证，不在端侧作答
-第 3 轮：识别='陪我聊会儿天' 意图=unknown 本地处理=False
+意图在端侧本地执行，不上行
+第 2 轮：识别='陪我聊会儿天' 意图=unknown 本地处理=False
+收到云端回复：'我听着呢，你继续说。'（情感=tenderness）
+第 3 轮：识别='今天天气怎么样' 属事实性请求（REALTIME_FACT），引导上云求证，不在端侧作答
+收到云端回复：'我听着呢，你继续说。'（情感=tenderness）
 模拟结束。降级档位：NORMAL
 ```
 
@@ -51,8 +54,12 @@ powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
 
 ```
 会话已注册：session-local-1 → 处理单元 unit-2
+下发回复：会话=session-local-1 意图=unknown 本地已处理=false
 会话已回收：session-local-1（原因：simulator_finished）
 ```
+
+> **注意**：云端回复内容目前是**占位话术**（`DownlinkReplyService.buildText`）。
+> 链路是通的，但机器人还没有"记住你"的能力 —— 那需要意图判定与记忆装配。
 
 **前置依赖**（本机路径）：
 
@@ -155,10 +162,12 @@ powershell -ExecutionPolicy Bypass -File core\scripts\validate-protocol.ps1
 - 事实性守卫（端侧不编造具体事实）
 - 端侧指标采集与报告导出
 - 云端协议校验、会话注册与粘滞路由
-- 上行链路端到端实测
+- 下行发布（首包/末包标记、序号连续、发布前协议校验）与端侧下行接收
+- **双向链路端到端实测**（上行 + 下行回复一一对应）
 
-**未实现**：云端鉴权、下行语音下发、Redis 会话存储、
-云端意图判定与多轮澄清、记忆装配、评测门禁、设备侧固件、真实语音交互。
+**未实现**：云端鉴权、Redis 会话存储、云端意图判定与多轮澄清、
+记忆装配（机器人回复目前是占位话术）、真实 TTS 音频、评测门禁、
+设备侧固件、真实语音交互。
 
 > **不要声称支持尚未实现的能力。** 逐条边界见
 > [`docs/known-limitations.md`](docs/known-limitations.md)。
