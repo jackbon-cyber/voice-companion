@@ -1,0 +1,58 @@
+# ===== 编译产物 =====
+target/
+build/
+dist/
+out/
+*.class
+*.jar
+*.war
+*.pyd
+*.so
+*.dylib
+*.dll
+
+# ===== 依赖目录 =====
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# ===== 模型权重（体积大，走脚本按需下载，不入库）=====
+models/
+*.gguf
+*.bin
+*.onnx
+*.pt
+*.safetensors
+*.tflite
+whisper/
+*.wav
+*.pcm
+
+# ===== 本地密钥与配置 =====
+.env
+.env.local
+*.local
+local.properties
+application-local.yml
+application-local.yaml
+
+# ===== 日志与运行时产物 =====
+logs/
+*.log
+data/chroma/
+chroma_data/
+eval/reports/*.json
+
+# ===== IDE / 系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== deploy 层：公司内网适配，私有实现，不进开源仓库 =====
+deploy/*
+!deploy/README.md
+!deploy/.gitkeep
