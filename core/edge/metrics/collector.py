@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Mapping
 
 # 样本量低于该值时，统计量不具统计意义，不参与门禁判定。
 MIN_SAMPLE_COUNT = 100
@@ -25,7 +27,7 @@ DEFAULT_PERCENTILE = 0.95
 class TurnTimings:
     """一轮对话的分段耗时快照。
 
-    各字段为对应指标的 P95（毫秒），无样本时为 0。
+    各字段为对应指标的中位数（毫秒），无样本时为 0。
     """
 
     vad_ms: int = 0
@@ -33,6 +35,12 @@ class TurnTimings:
     intent_ms: int = 0
     round_trip_ms: int = 0
     first_packet_ms: int = 0
+
+    #: 各指标的样本数。门禁脚本据此判断**哪个指标**样本不足。
+    sample_counts: Mapping[str, int] = field(default_factory=dict)
+
+    #: 已采集指标中的最小样本数。回答"已采到的指标里最弱的那个有多少样本"；
+    #: 哪个指标完全没采到，由 ``sample_counts`` 中值为 0 的项回答。
     sample_count: int = 0
 
 
@@ -106,18 +114,33 @@ class MetricsCollector:
         各字段取**中位数**：中位数对偶发长尾不敏感，作为"典型体验"更合适；
         P95 由门禁脚本按需从原始样本另行计算。
 
-        样本不足时仍返回数值，但调用方应依据 ``sample_count`` 判断
-        该指标是否参与门禁。
+        ``sample_counts`` 给出**每个指标各自的**样本数 ——
+        五个指标的样本数通常不等：离线降级时不上行首包，首包指标就没有样本。
+        用其中一个指标代表整体会误判门禁。
+
+        ``sample_count`` 是**有样本的指标中的最小值**（全部指标都无样本时为 0）。
+        它回答"已采集到的这些指标里，最弱的那个有多少样本"；
+        而"哪个指标根本没采到"由 ``sample_counts`` 里值为 0 的项回答。
+        门禁脚本要同时看这两个：只看前者会把"首包指标完全没采到"误判为样本充足。
 
         @return 分段耗时快照
         """
+        counts = {
+            "vad": len(self._vad),
+            "asr": len(self._asr),
+            "intent": len(self._intent),
+            "round_trip": len(self._round_trip),
+            "first_packet": len(self._first_packet),
+        }
+        populated = [count for count in counts.values() if count > 0]
         return TurnTimings(
             vad_ms=percentile(self._vad, 0.5),
             asr_ms=percentile(self._asr, 0.5),
             intent_ms=percentile(self._intent, 0.5),
             round_trip_ms=percentile(self._round_trip, 0.5),
             first_packet_ms=percentile(self._first_packet, 0.5),
-            sample_count=len(self._first_packet),
+            sample_counts=MappingProxyType(counts),
+            sample_count=min(populated) if populated else 0,
         )
 
     def reset(self) -> None:

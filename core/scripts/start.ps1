@@ -85,11 +85,10 @@ if (-not $SkipChroma) {
 
 if ($SkipBackend) {
     Write-Host '跳过云端后端启动'
-    Write-Host ''
-    Write-Host '启动完成。端侧模拟端请手动运行：'
-    Write-Host '  cd core'
-    Write-Host '  ..\F:\tools\python313\python.exe -m edge.simulator'
-    exit 0
+Write-Host ''
+Write-Host '启动完成。端侧模拟端请手动运行（在仓库根目录）：'
+Write-Host '  F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:8080/voice/uplink'
+exit 0
 }
 
 Write-Host ''
@@ -107,8 +106,17 @@ if ($null -eq $mvn) {
 
 Push-Location $CloudRoot
 try {
+    # 日志落盘：后台进程没有窗口，出错时无处可查。开发期落文件，便于定位启动失败与运行期异常。
+    $LogDir = Join-Path $CloudRoot 'logs'
+    if (-not (Test-Path $LogDir)) {
+        New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+    }
+    $StdOutLog = Join-Path $LogDir 'backend.out.log'
+    $StdErrLog = Join-Path $LogDir 'backend.err.log'
+
     $backend = Start-Process -FilePath $mvn -ArgumentList 'spring-boot:run' `
-        -WorkingDirectory $CloudRoot -PassThru -WindowStyle Hidden
+        -WorkingDirectory $CloudRoot -PassThru -WindowStyle Hidden `
+        -RedirectStandardOutput $StdOutLog -RedirectStandardError $StdErrLog
 } finally {
     Pop-Location
 }
@@ -116,11 +124,11 @@ try {
 Write-Host "云端后端进程已启动（PID $($backend.Id)）"
 Write-Host '等待后端就绪...'
 if (-not (Wait-ForHttpOk -Uri $BackendHealthUri -TimeoutSeconds 180)) {
-    throw "云端后端在 180 秒内未就绪（$BackendHealthUri）。请检查后端日志。"
+    throw "云端后端在 180 秒内未就绪（$BackendHealthUri）。请检查日志：$StdOutLog"
 }
 Write-Host "云端后端已就绪：$BackendHealthUri"
+Write-Host "后端日志：$StdOutLog"
 
 Write-Host ''
-Write-Host '启动完成。端侧模拟端请手动运行：'
-Write-Host '  cd core'
-Write-Host '  F:\tools\python313\python.exe -m edge.simulator'
+Write-Host '启动完成。端侧模拟端请手动运行（在仓库根目录）：'
+Write-Host '  F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:8080/voice/uplink'

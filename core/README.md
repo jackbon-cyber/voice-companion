@@ -52,13 +52,20 @@ Chroma 必须先于后端起来 —— 后端启动时做一次 Chroma 连通性
 # 1. 起 ChromaDB + 云端后端（自动等待两个健康检查通过）
 powershell -ExecutionPolicy Bypass -File core/scripts/start.ps1
 
-# 2. 起端侧模拟端（另开一个终端）
-cd core
-F:\tools\python313\python.exe -m edge.simulator
+# 2. 起端侧模拟端（另开一个终端，在仓库根执行）
+F:\tools\python313\python.exe -m core.edge.simulator --url ws://127.0.0.1:8080/voice/uplink
 
 # 3. 停环境
 powershell -ExecutionPolicy Bypass -File core/scripts/stop.ps1
 ```
+
+> **为什么在仓库根执行**：端侧代码位于 `core/` 包下，模块全名是 `core.edge.simulator`。
+> 在 `core/` 目录里执行 `python -m edge.simulator` 会因包路径不对而失败。
+>
+> **端侧模拟端做了什么**：不接真实麦克风与扬声器。它生成一段模拟音频驱动
+> VAD 与断句，经端侧识别（未装模型时走 `NullRecognizer`）与意图判定后上行，
+> 最后发出会话结束消息 —— 端云链路的骨架是通的，但**没有真实语音交互**。
+> 接上真实麦克风与 TTS 播放属第二阶段。
 
 ---
 

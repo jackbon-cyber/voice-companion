@@ -1,4 +1,4 @@
-"""上行通道测试用的本地 WebSocket 服务夹具。"""
+"""端侧测试共用的本地 WebSocket 服务夹具。"""
 
 from __future__ import annotations
 

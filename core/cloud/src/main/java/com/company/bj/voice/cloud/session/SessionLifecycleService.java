@@ -76,6 +76,7 @@ public class SessionLifecycleService {
         String unitId = sessionRegistry.resolveUnit(sessionId);
         sessionRegistry.register(
                 sessionId, new SessionContext(sessionId, unitId, clock.millis()));
+        LOGGER.info("会话已注册：{} → 处理单元 {}", sessionId, unitId);
         return unitId;
     }
 
@@ -105,6 +106,7 @@ public class SessionLifecycleService {
      */
     public void onSessionEnd(String sessionId, String reason) {
         sessionRegistry.remove(sessionId);
+        LOGGER.info("会话已回收：{}（原因：{}）", sessionId, reason);
     }
 
     /**
