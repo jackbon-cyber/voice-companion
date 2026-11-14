@@ -63,9 +63,17 @@ powershell -ExecutionPolicy Bypass -File core/scripts/stop.ps1
 > 在 `core/` 目录里执行 `python -m edge.simulator` 会因包路径不对而失败。
 >
 > **端侧模拟端做了什么**：不接真实麦克风与扬声器。它生成一段模拟音频驱动
-> VAD 与断句，经端侧识别（未装模型时走 `NullRecognizer`）与意图判定后上行，
-> 最后发出会话结束消息 —— 端云链路的骨架是通的，但**没有真实语音交互**。
+> VAD 与断句，经端侧识别与意图判定后上行，最后发出会话结束消息 ——
+> 端云链路的骨架是通的，但**没有真实语音交互**。
+> 模拟端的识别走 `ScriptedRecognizer`（按脚本返回文本），
+> 目的是让识别 → 意图 → 上云这条链路能被演示；
+> 生产路径用的是 `FasterWhisperRecognizer` / `NullRecognizer`。
 > 接上真实麦克风与 TTS 播放属第二阶段。
+>
+> **能演示的三条路径**：
+> - 固定指令（如"把音量调到五十"）→ 端侧规则命中，本地执行，不上云；
+> - 事实性请求（如"今天天气怎么样"）→ 端侧**不编造**，引导上云求证；
+> - 开放闲聊（如"陪我聊会儿天"）→ 判为长尾意图，上云由云端处理。
 
 ---
 
@@ -74,16 +82,27 @@ powershell -ExecutionPolicy Bypass -File core/scripts/stop.ps1
 ### 端侧（Python）
 
 ```powershell
-cd core
-
-# 跑全部测试
-F:\tools\python313\python.exe -m pytest tests -v
+# 在仓库根执行
+F:\tools\python313\python.exe -m pytest core\tests -v
 
 # 只跑协议相关
-F:\tools\python313\python.exe -m pytest tests\protocol -v
+F:\tools\python313\python.exe -m pytest core\tests\protocol -v
 
 # 只跑跨语言契约一致性
-F:\tools\python313\python.exe -m pytest tests\protocol\test_cross_language_consistency.py -v
+F:\tools\python313\python.exe -m pytest core\tests\protocol\test_cross_language_consistency.py -v
+
+# 只跑契约文档与 schema 的一致性检查
+F:\tools\python313\python.exe -m pytest core\tests\protocol\test_contract_doc.py -v
+```
+
+### 协议校验（端云两侧）
+
+```powershell
+# 校验全部 schema 与共享样例
+powershell -ExecutionPolicy Bypass -File core\scripts\validate-protocol.ps1
+
+# 只做 schema 自检
+powershell -ExecutionPolicy Bypass -File core\scripts\validate-protocol.ps1 -SchemaOnly
 ```
 
 ### 云端（Java）
@@ -134,19 +153,24 @@ powershell -ExecutionPolicy Bypass -File core/scripts/fetch-models.ps1
 core/
 ├── protocol/                 # 端云协议契约（JSON Schema，Python 与 Java 共用同一份）
 │   ├── loader.py
-│   └── schema/               # 7 份 schema
+│   ├── validator.py          # 统一校验入口（离线解析 $ref）
+│   └── schema/               # 8 份 schema
 ├── edge/                     # 端侧
-│   ├── audio/                # 格式协商、VAD、断句
+│   ├── audio/                # 帧组装、格式协商、VAD、断句
 │   ├── asr/                  # 识别适配层与拒识
 │   ├── intent/               # 两级意图判定
-│   ├── dialog/               # 本地兜底对话
+│   ├── dialog/               # 本地兜底对话与事实性守卫
+│   ├── session/              # 端侧会话状态机与 barge-in 打断
 │   ├── degrade/              # 降级档位策略
 │   ├── transport/            # 上行通道与控制通道
-│   └── metrics/              # 分段耗时采集
+│   ├── metrics/              # 分段耗时采集与报告导出
+│   └── simulator.py          # 端侧模拟端主循环
 ├── cloud/                    # 云端（Spring Boot 3.3.5 / Java 21）
-│   ├── session/              # 会话注册与粘滞路由
-│   └── protocol/             # Java 侧协议校验
-├── scripts/                  # chroma / start / stop / fetch-models
+│   ├── session/              # 会话注册、粘滞路由、上行通道处理
+│   ├── protocol/             # Java 侧协议校验
+│   ├── config/               # Spring 配置
+│   └── web/                  # 健康检查端点
+├── scripts/                  # chroma / start / stop / fetch-models / validate-protocol
 ├── tests/                    # Python 侧测试
 └── requirements.txt
 ```
