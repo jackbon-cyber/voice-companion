@@ -33,6 +33,34 @@ public class UserProfileStore {
     /** 各作用域的画像。 */
     private final Map<String, UserProfile> profiles = new LinkedHashMap<>();
 
+    /** 当前作用域键。 */
+    private volatile String currentScopeKey = DEFAULT_SCOPE_KEY;
+
+    /** 默认作用域键。 */
+    public static final String DEFAULT_SCOPE_KEY = "default-user";
+
+    /**
+     * 设置当前作用域键。
+     *
+     * <p>画像的读写方很多（画像更新子智能体、上下文装配器、守卫），
+     * 让它们各自传作用域键容易出错 —— 传错就会写到别人的画像上。
+     * 改为由入口处设置一次当前作用域。
+     *
+     * @param scopeKey 作用域键
+     */
+    public void useScope(String scopeKey) {
+        this.currentScopeKey = scopeKey == null || scopeKey.isBlank() ? DEFAULT_SCOPE_KEY : scopeKey;
+    }
+
+    /**
+     * 返回当前作用域键。
+     *
+     * @return 作用域键
+     */
+    public String currentScopeKey() {
+        return currentScopeKey;
+    }
+
     /**
      * 读取画像。
      *
