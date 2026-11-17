@@ -14,10 +14,12 @@ def _collector_with_samples(count: int = 100) -> MetricsCollector:
         collector.record_intent(value * 3)
         collector.record_round_trip(value * 4)
         collector.record_first_packet(value * 5)
+        collector.record_generation(micros=count * 1000, tokens=value)
+        collector.record_confidence(value / count)
     return collector
 
 
-def test_report_contains_all_five_stages():
+def test_report_contains_all_scalars():
     reporter = MetricsReporter(_collector_with_samples())
 
     report = reporter.build()
@@ -61,7 +63,8 @@ def test_missing_metric_is_listed_separately():
 
     report = reporter.build()
 
-    assert report.missing_metrics == ["asr", "intent", "round_trip", "first_packet"]
+    assert report.missing_metrics == ["asr", "intent", "round_trip", "first_packet",
+                                      "generation", "confidence"]
     assert [metric.name for metric in report.metrics] == ["vad"]
 
 

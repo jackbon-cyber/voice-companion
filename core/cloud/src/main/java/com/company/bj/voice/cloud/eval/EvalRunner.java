@@ -43,6 +43,9 @@ public class EvalRunner {
     /** 报告字段名：各维度结果。 */
     public static final String FIELD_DIMENSIONS = "dimensions";
 
+    /** 报告字段名：评测环境信息。 */
+    public static final String FIELD_ENVIRONMENT = "environment";
+
     /** 评测集。 */
     private final EvalDataset dataset;
 
@@ -241,10 +244,11 @@ public class EvalRunner {
      * @param report         评测报告
      * @param ruleOverlapCount 规则型维度与词表的字面重叠条数
      * @param evalScope      记忆召回维度使用的评测作用域；未执行该维度时为空
+     * @param environment    评测环境信息；为空时不渲染该小节
      * @return Markdown 文本
      */
     public static String renderMarkdown(EvalExecutor.EvalReport report, int ruleOverlapCount,
-        MemoryScope evalScope) {
+        MemoryScope evalScope, EvalEnvironment environment) {
         StringBuilder builder = new StringBuilder();
         builder.append("# 语音陪伴机器人评测报告\n\n");
 
@@ -300,6 +304,11 @@ public class EvalRunner {
                 .append("实测值可复现。\n");
         }
 
+        if (environment != null && !environment.keys().isEmpty()) {
+            builder.append("\n## 评测环境\n\n");
+            builder.append(environment.toMarkdown());
+        }
+
         return builder.toString();
     }
 
@@ -307,13 +316,22 @@ public class EvalRunner {
      * 把报告渲染为可序列化的映射。
      *
      * @param report 评测报告
+     * @param environment 评测环境信息；为空时不写入该字段
      * @return 报告内容
      */
-    public static Map<String, Object> renderMap(EvalExecutor.EvalReport report) {
+    public static Map<String, Object> renderMap(EvalExecutor.EvalReport report,
+        EvalEnvironment environment) {
         Map<String, Object> map = new LinkedHashMap<>();
         map.put(FIELD_OVERALL_PASSED, report.overallPassed());
         map.put(FIELD_FAILED_DIMENSIONS, report.failedDimensions());
         map.put(FIELD_DIMENSIONS, report.toMap().get(FIELD_DIMENSIONS));
+        if (environment != null && !environment.keys().isEmpty()) {
+            Map<String, String> entries = new LinkedHashMap<>();
+            for (String key : environment.keys()) {
+                entries.put(key, environment.value(key));
+            }
+            map.put(FIELD_ENVIRONMENT, entries);
+        }
         return map;
     }
 

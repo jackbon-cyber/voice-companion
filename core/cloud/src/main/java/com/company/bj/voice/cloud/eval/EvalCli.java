@@ -20,7 +20,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 评测命令行入口。
@@ -202,9 +204,10 @@ public final class EvalCli {
 
         EvalExecutor.EvalReport report = wiredRunner.run();
         int ruleOverlapCount = wiredRunner.checkRuleBasedOverlap().overlapping().size();
+        EvalEnvironment environment = collectEnvironment(options);
         String markdown = EvalRunner.renderMarkdown(report, ruleOverlapCount,
-            wiredRunner.evalScope());
-        String json = renderJson(report);
+            wiredRunner.evalScope(), environment);
+        String json = renderJson(report, environment);
 
         try {
             writeReport(options.reportPath(), markdown);
@@ -249,16 +252,56 @@ public final class EvalCli {
     }
 
     /**
+     * 采集评测环境信息。
+     *
+     * <p><b>只采集稳定标识，绝不采集时间戳</b>：报告要能被两次运行的 diff 比对，
+     * 带生成时间的报告每次必然不同，真实指标的变化会被噪声淹没。
+     *
+     * <p>某个组件探测失败时不中断评测 —— 环境信息是补充说明，
+     * 不是判据。此时该条目留空，由使用者自己判断这次结果的可比性。
+     *
+     * @param options 命令行选项
+     * @return 环境信息
+     */
+    private static EvalEnvironment collectEnvironment(Options options) {
+        Map<String, String> entries = new LinkedHashMap<>(4);
+        entries.put("jdk", System.getProperty("java.version", "未知"));
+        entries.put("chroma", probeChromaVersion(options.chromaBaseUrl()));
+        entries.put("embedding", options.embeddingBaseUrl());
+        return new EvalEnvironment(entries);
+    }
+
+    /**
+     * 探测 ChromaDB 版本号。
+     *
+     * @param chromaBaseUrl ChromaDB 基址
+     * @return 版本号；探测失败时返回说明文本而非抛异常
+     */
+    private static String probeChromaVersion(String chromaBaseUrl) {
+        try {
+            ChromaProperties props = new ChromaProperties();
+            props.setBaseUrl(chromaBaseUrl);
+            ChromaClient chroma = new ChromaClient(props,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(3)).build(),
+                new ObjectMapper());
+            return chroma.version();
+        } catch (RuntimeException error) {
+            return "不可用（" + error.getMessage() + "）";
+        }
+    }
+
+    /**
      * 渲染 JSON 报告。
      *
-     * @param report 评测报告
+     * @param report      评测报告
+     * @param environment 评测环境信息
      * @return JSON 文本
      */
-    private static String renderJson(EvalExecutor.EvalReport report) {
+    private static String renderJson(EvalExecutor.EvalReport report, EvalEnvironment environment) {
         try {
             ObjectMapper mapper = new ObjectMapper();
             return mapper.writerWithDefaultPrettyPrinter()
-                .writeValueAsString(EvalRunner.renderMap(report));
+                .writeValueAsString(EvalRunner.renderMap(report, environment));
         } catch (IOException error) {
             return "{\"error\":\"" + error.getMessage() + "\"}";
         }

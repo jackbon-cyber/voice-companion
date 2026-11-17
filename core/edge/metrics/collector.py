@@ -25,6 +25,15 @@ DEFAULT_PERCENTILE = 0.95
 # 微秒转毫秒的缩放因子。
 MICROS_PER_MILLI = 1000
 
+# 微秒转秒的缩放因子。
+MICROS_PER_SECOND = 1_000_000
+
+# 置信度分桶阈值：高置信度下界（含）。
+CONFIDENCE_HIGH_THRESHOLD = 0.9
+
+# 置信度分桶阈值：中等置信度下界（含）。低于该值为低置信度。
+CONFIDENCE_MEDIUM_THRESHOLD = 0.7
+
 
 def _micros_to_millis(micros: int) -> float:
     """把微秒折算成毫秒，保留一位小数的精度。
@@ -55,6 +64,18 @@ class TurnTimings:
     intent_ms: float = 0
     round_trip_ms: float = 0
     first_packet_ms: float = 0
+
+    #: 端侧生成速度（token/秒）。无样本时为 0。
+    generation_tokens_per_second: float = 0
+
+    #: 置信度分桶：高置信度样本数（>= 0.9）。
+    confidence_high: int = 0
+
+    #: 置信度分桶：中等置信度样本数（[0.7, 0.9)）。
+    confidence_medium: int = 0
+
+    #: 置信度分桶：低置信度样本数（< 0.7）。
+    confidence_low: int = 0
 
     #: 各指标的样本数。门禁脚本据此判断**哪个指标**样本不足。
     sample_counts: Mapping[str, int] = field(default_factory=dict)
@@ -92,6 +113,8 @@ class MetricsCollector:
         self._intent: list[float] = []
         self._round_trip: list[float] = []
         self._first_packet: list[float] = []
+        self._generation_speeds: list[float] = []
+        self._confidences: list[float] = []
 
     def record_vad(self, ms: int) -> None:
         """记录一次 VAD 耗时。
@@ -155,6 +178,35 @@ class MetricsCollector:
         """
         self._intent.append(_micros_to_millis(micros))
 
+    def record_generation(self, micros: int, tokens: int) -> None:
+        """记录一次端侧生成。
+
+        **为什么用"每秒 token 数"而不是毫秒**：毫秒只能说明"这次生成花了多久"，
+        说明不了"模型有多快"—— 生成 5 个字花 100 毫秒与生成 50 个字花
+        100 毫秒是两种完全不同的能力。只有归一化到 token 才可比较。
+
+        @param micros 生成耗时（微秒）
+        @param tokens 生成的 token 数
+        """
+        if tokens <= 0 or micros <= 0:
+            # 生成 0 个 token 或耗时为 0 时速度无意义，不参与统计。
+            return
+        self._generation_speeds.append(tokens * MICROS_PER_SECOND / micros)
+
+    def record_confidence(self, confidence: float) -> None:
+        """记录一次识别置信度。
+
+        **为什么记录分布而不是平均值**：平均值会掩盖
+        "绝大多数很自信、少数极不自信"这种关键形态 ——
+        后者恰恰是拒识机制要拦下的部分，只有分桶统计才看得见。
+
+        @param confidence 置信度，取值区间为 0 到 1
+        @throws ValueError 置信度不在 [0, 1] 区间时抛出
+        """
+        if not 0.0 <= confidence <= 1.0:
+            raise ValueError(f"置信度必须落在 [0, 1]，得到 {confidence}")
+        self._confidences.append(confidence)
+
     def snapshot(self) -> TurnTimings:
         """生成快照。
 
@@ -178,17 +230,38 @@ class MetricsCollector:
             "intent": len(self._intent),
             "round_trip": len(self._round_trip),
             "first_packet": len(self._first_packet),
+            "generation": len(self._generation_speeds),
+            "confidence": len(self._confidences),
         }
         populated = [count for count in counts.values() if count > 0]
+        high, medium, low = self._confidence_buckets()
         return TurnTimings(
             vad_ms=percentile(self._vad, 0.5),
             asr_ms=percentile(self._asr, 0.5),
             intent_ms=percentile(self._intent, 0.5),
             round_trip_ms=percentile(self._round_trip, 0.5),
             first_packet_ms=percentile(self._first_packet, 0.5),
+            generation_tokens_per_second=percentile(self._generation_speeds, 0.5),
+            confidence_high=high,
+            confidence_medium=medium,
+            confidence_low=low,
             sample_counts=MappingProxyType(counts),
             sample_count=min(populated) if populated else 0,
         )
+
+    def _confidence_buckets(self) -> tuple[int, int, int]:
+        """按固定阈值把置信度样本分桶。
+
+        @return (高置信度条数, 中等置信度条数, 低置信度条数)
+        """
+        high = sum(1 for value in self._confidences if value >= CONFIDENCE_HIGH_THRESHOLD)
+        medium = sum(
+            1
+            for value in self._confidences
+            if CONFIDENCE_MEDIUM_THRESHOLD <= value < CONFIDENCE_HIGH_THRESHOLD
+        )
+        low = sum(1 for value in self._confidences if value < CONFIDENCE_MEDIUM_THRESHOLD)
+        return high, medium, low
 
     def reset(self) -> None:
         """清空已采集的样本。"""
@@ -197,11 +270,14 @@ class MetricsCollector:
         self._intent = []
         self._round_trip = []
         self._first_packet = []
+        self._generation_speeds = []
+        self._confidences = []
 
     def samples_of(self, name: str) -> list[float]:
         """取某个指标的原始样本。
 
-        @param name 指标标识（vad / asr / intent / round_trip / first_packet）
+        @param name 指标标识（vad / asr / intent / round_trip / first_packet /
+            generation / confidence）
         @return 样本列表；指标名未知时返回空列表
         @throws ValueError 指标名未知时抛出
         """
@@ -211,6 +287,8 @@ class MetricsCollector:
             "intent": self._intent,
             "round_trip": self._round_trip,
             "first_packet": self._first_packet,
+            "generation": self._generation_speeds,
+            "confidence": self._confidences,
         }
         if name not in buckets:
             raise ValueError(f"未知指标名：{name}")

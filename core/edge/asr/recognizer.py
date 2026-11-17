@@ -145,9 +145,9 @@ class FasterWhisperRecognizer:
 
         try:
             segments, _ = self._model.transcribe(
-                self._to_wav(pcm),
+                self._to_float32(pcm),
                 language="zh",
-                initial_prompt="、".join(self._hotwords) if self._hotwords else None,
+                hotwords=build_prompt_text(self._hotwords),
             )
             for segment in segments:
                 text = (segment.text or "").strip()
@@ -193,6 +193,62 @@ class FasterWhisperRecognizer:
             wav_file.setframerate(16000)
             wav_file.writeframes(pcm)
         return buffer.getvalue()
+
+    def _to_float32(self, pcm: bytes):
+        """把裸 PCM 转成归一化浮点数组。
+
+        **为什么直接喂数组而不是 WAV 文件**：faster-whisper 收到 numpy 数组时
+        会跳过音频解码，而解码那一步依赖 PyAV。本机 PyAV 19 已移除
+        ``av.open(..., metadata_errors=...)`` 参数，与 faster-whisper 1.1.1
+        不兼容，表现为识别一律失败并返回空文本 —— 而异常被识别器的兜底
+        分支吞掉，从外面看只是"识别不准"，排查方向会被带偏。
+
+        我们的输入本来就是 16 kHz 单声道 16-bit PCM，**无需任何解码**：
+        直接转成浮点数组既绕开 PyAV，也让端侧路径更短。
+
+        @param pcm PCM 音频字节
+        @return 归一化后的 float32 数组
+        """
+        import numpy as np
+
+        samples = np.frombuffer(pcm, dtype=np.int16)
+        return pcm_to_float32(samples)
+
+
+# 简体偏置提示语。
+#
+# **为什么必须有它**：Whisper 的中文训练数据里繁体占比很高，
+# 不给偏置时"今天天气真不错"会被识别成"今天天氣真不錯"。
+# 对陪伴机器人而言这是**功能性缺陷**而非观感问题 ——
+# 下游的关键词意图匹配会全部失效（"别说了" 匹配不上 "別說了"）。
+MANDARIN_PROMPT = "以下是普通话的句子。"
+
+
+def build_prompt_text(hotwords: list[str]) -> str:
+    """构造识别提示语。
+
+    @param hotwords 热词列表
+    @return 提示语文本；无热词时只含普通话偏置
+    """
+    parts = [MANDARIN_PROMPT]
+    meaningful = [word.strip() for word in hotwords if word and word.strip()]
+    if meaningful:
+        parts.append("、".join(meaningful))
+    return " ".join(parts)
+
+
+def pcm_to_float32(samples):
+    """把 16-bit 有符号 PCM 样本归一化到 [-1, 1] 的 float32 数组。
+
+    **除以 32768 而不是 32767**：Whisper 的特征提取器假定输入满幅为 1.0。
+    用 32767 会让峰值略大于 1，对短音频的静音段判定有影响。
+
+    @param samples int16 样本数组
+    @return 归一化后的 float32 数组
+    """
+    import numpy as np
+
+    return samples.astype(np.float32) / 32768.0
 
 
 def create_recognizer(model_dir: Path | None = None) -> SpeechRecognizer:

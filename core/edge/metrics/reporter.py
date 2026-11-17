@@ -27,12 +27,52 @@ from core.edge.metrics.collector import (
 )
 
 # 报告里各指标的中文名与单位。
+#
+# 只包含**标量**指标。置信度是分布而非标量，不在此列 ——
+# 把它塞进"中位数 / P95"的结构里会掩盖真正要看的形态
+# （绝大多数很自信、少数极不自信），因此单独成分布一节。
 METRIC_LABELS: dict[str, tuple[str, str]] = {
     "vad": ("语音活动判定", "ms"),
     "asr": ("端侧识别", "ms"),
     "intent": ("意图判定", "ms"),
     "round_trip": ("上云往返", "ms"),
     "first_packet": ("首包延迟", "ms"),
+    "generation": ("端侧生成速度", "token/s"),
+}
+
+# 各指标在快照里的字段名。与 MetricsCollector 的样本桶一一对应。
+METRIC_FIELDS: dict[str, str] = {
+    "vad": "vad_ms",
+    "asr": "asr_ms",
+    "intent": "intent_ms",
+    "round_trip": "round_trip_ms",
+    "first_packet": "first_packet_ms",
+    "generation": "generation_tokens_per_second",
+}
+
+# 各指标的数值语义。说明 ``medianMs`` / ``percentileMs`` 这两个字段
+# 在该指标下到底代表什么 —— 它们的字段名带 Ms，但生成速度是 token/s，
+# 置信度是 0 到 1 的分数。不声明清楚，读报告的人只能靠猜。
+VALUE_KINDS: dict[str, str] = {
+    "vad": "durationMs",
+    "asr": "durationMs",
+    "intent": "durationMs",
+    "round_trip": "durationMs",
+    "first_packet": "durationMs",
+    "generation": "ratePerSecond",
+    "confidence": "score",
+}
+
+# 置信度分桶的中文名。
+CONFIDENCE_BUCKET_LABELS: dict[str, str] = {
+    "high": "高置信度",
+    "medium": "中等置信度",
+    "low": "低置信度",
+}
+
+# 非标量指标的中文名。只用于"未采集到样本的指标"清单的显示。
+NON_SCALAR_LABELS: dict[str, str] = {
+    "confidence": "识别置信度",
 }
 
 
@@ -56,6 +96,8 @@ class MetricReport:
     percentile_q: float
     #: 样本是否充足（达到 ``MIN_SAMPLE_COUNT``）。
     sufficient: bool
+    #: 数值语义。说明 ``median_ms`` / ``percentile_ms`` 在该指标下代表什么。
+    value_kind: str = "durationMs"
 
     def to_dict(self) -> dict[str, Any]:
         """转成可 JSON 序列化的字典。
@@ -71,6 +113,7 @@ class MetricReport:
             "percentileMs": self.percentile_ms,
             "percentileQ": self.percentile_q,
             "sufficient": self.sufficient,
+            "valueKind": self.value_kind,
         }
 
 
@@ -84,6 +127,8 @@ class MetricsReport:
     missing_metrics: list[str] = field(default_factory=list)
     #: 生成报告时的环境信息。
     environment: dict[str, str] = field(default_factory=dict)
+    #: 置信度分布。无样本时为空。
+    confidence_distribution: dict[str, int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """转成可 JSON 序列化的字典。
@@ -94,6 +139,7 @@ class MetricsReport:
             "metrics": [metric.to_dict() for metric in self.metrics],
             "missingMetrics": list(self.missing_metrics),
             "environment": dict(self.environment),
+            "confidenceDistribution": self.confidence_distribution,
         }
 
     def to_json(self, indent: int = 2) -> str:
@@ -118,9 +164,21 @@ class MetricsReport:
                 f"{metric.percentile_ms} | {metric.unit} | "
                 f"{'是' if metric.sufficient else '否'} |"
             )
+        if self.confidence_distribution:
+            lines.append("")
+            lines.append("## 识别置信度分布")
+            lines.append("")
+            lines.append("| 分档 | 样本数 |")
+            lines.append("|---|---|")
+            for bucket, label in CONFIDENCE_BUCKET_LABELS.items():
+                lines.append(
+                    f"| {label} | {self.confidence_distribution.get(bucket, 0)} |"
+                )
         if self.missing_metrics:
             missing_labels = "、".join(
-                METRIC_LABELS.get(name, (name, ""))[0] for name in self.missing_metrics
+                METRIC_LABELS[name][0] if name in METRIC_LABELS
+                else NON_SCALAR_LABELS.get(name, name)
+                for name in self.missing_metrics
             )
             lines.append("")
             lines.append(f"**未采集到样本的指标**：{missing_labels}")
@@ -178,17 +236,32 @@ class MetricsReporter:
                     label=label,
                     unit=unit,
                     sample_count=sample_count,
-                    median_ms=getattr(snapshot, f"{name}_ms"),
+                    median_ms=getattr(snapshot, METRIC_FIELDS[name]),
                     percentile_ms=self._percentile_of(name),
                     percentile_q=self._percentile_q,
                     sufficient=sample_count >= self._min_sample_count,
+                    value_kind=VALUE_KINDS.get(name, "durationMs"),
                 )
             )
+
+        confidence_distribution = None
+        if snapshot.sample_counts.get("confidence", 0) > 0:
+            confidence_distribution = {
+                "sample_count": snapshot.sample_counts["confidence"],
+                "high": snapshot.confidence_high,
+                "medium": snapshot.confidence_medium,
+                "low": snapshot.confidence_low,
+            }
+        else:
+            # 置信度不在标量指标表里，但要出现在"未采集"清单中 ——
+            # 没测到置信度分布同样是缺口，不能因为它不占一行就消失。
+            missing.append("confidence")
 
         return MetricsReport(
             metrics=metrics,
             missing_metrics=missing,
             environment=dict(environment or {}),
+            confidence_distribution=confidence_distribution,
         )
 
     def _percentile_of(self, name: str) -> float:
