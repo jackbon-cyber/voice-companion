@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 # 默认识别置信度阈值。低于该值视为拒识，不上云。
@@ -25,6 +26,9 @@ DEFAULT_DEVICE = "cpu"
 
 # 默认计算精度。int8 量化是 CPU 上的常规选择。
 DEFAULT_COMPUTE_TYPE = "int8"
+
+# 本地模型目录相对仓库根。与 core/scripts/fetch-models.ps1 的落盘位置一致。
+DEFAULT_MODEL_DIR = Path("core/models/asr")
 
 
 @dataclass(frozen=True)
@@ -78,12 +82,14 @@ class FasterWhisperRecognizer:
         model_size: str = DEFAULT_MODEL_SIZE,
         device: str = DEFAULT_DEVICE,
         compute_type: str = DEFAULT_COMPUTE_TYPE,
+        model_dir: Path | None = None,
     ) -> None:
         """加载识别模型。
 
-        @param model_size 模型规格名
+        @param model_size 模型规格名；提供 model_dir 时该参数被忽略
         @param device 推理设备
         @param compute_type 计算精度
+        @param model_dir 本地模型目录；提供时从该目录加载，不访问网络
         @throws RuntimeError 模型加载失败时抛出，消息里给出可执行的补救指引
         """
         try:
@@ -95,10 +101,16 @@ class FasterWhisperRecognizer:
             ) from error
 
         try:
-            self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
+            if model_dir is not None:
+                # 本地目录加载：不触网。模型文件由 core/scripts/fetch-models.ps1 备好。
+                self._model = WhisperModel(
+                    str(model_dir), device=device, compute_type=compute_type
+                )
+            else:
+                self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
         except Exception as error:
             raise RuntimeError(
-                f"端侧 ASR 模型 {model_size} 加载失败：{error}。"
+                f"端侧 ASR 模型 {model_dir or model_size} 加载失败：{error}。"
                 "请先执行 `core/scripts/fetch-models.ps1` 下载模型权重。"
             ) from error
 
@@ -181,6 +193,28 @@ class FasterWhisperRecognizer:
             wav_file.setframerate(16000)
             wav_file.writeframes(pcm)
         return buffer.getvalue()
+
+
+def create_recognizer(model_dir: Path | None = None) -> SpeechRecognizer:
+    """构造识别器：本地模型优先，缺失时降级。
+
+    **优先本地目录而非模型名**：用模型名构造会触发 HuggingFace Hub 联网下载，
+    在离��环境里表现为「连接超时」，排查方向会被带到网络问题上。
+    本地模型由 `core/scripts/fetch-models.ps1` 备好，目录存在就直接用。
+
+    降级到 {@link NullRecognizer} 而不是抛异常：端侧在缺模型时仍要能跑通全链路。
+
+    @param model_dir 本地模型目录；为 None 时取默认路径
+    @return 识别器
+    """
+    directory = model_dir or DEFAULT_MODEL_DIR
+    if directory.is_dir() and (directory / "model.bin").exists():
+        try:
+            return FasterWhisperRecognizer(model_dir=directory)
+        except RuntimeError:
+            # 本地模型损坏时同样降级：整条链路不能因为识别器起不来而断掉。
+            pass
+    return NullRecognizer()
 
 
 def is_confident(result: RecognitionResult, threshold: float = DEFAULT_CONFIDENCE_THRESHOLD) -> bool:

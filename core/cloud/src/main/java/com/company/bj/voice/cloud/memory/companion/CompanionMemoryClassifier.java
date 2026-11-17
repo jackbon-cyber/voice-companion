@@ -60,6 +60,24 @@ public class CompanionMemoryClassifier {
             "在吗", "吃了吗", "睡了", "起床", "哈哈", "呵呵", "嘿嘿");
 
     /**
+     * 返回记忆分类器使用的全部关键词。
+     *
+     * <p>暴露出来是为了让评测集做<b>语料交集检查</b>：
+     * 评测集里若混进了这些关键词构成的句子，
+     * 测出来的召回率衡量的是背诵而不是泛化。
+     *
+     * <p>调用方拿到的是<b>不可变副本</b>，改不动内部状态。
+     *
+     * @return 全部关键词
+     */
+    public static List<String> keywords() {
+        return List.of(
+            RELATIONSHIP_KEYWORDS, RELATIONSHIP_PATTERNS, PREFERENCE_KEYWORDS,
+            INSTRUCTION_KEYWORDS, TIME_SENSITIVE_KEYWORDS, EMOTION_KEYWORDS,
+            SMALL_TALK_KEYWORDS).stream().flatMap(List::stream).toList();
+    }
+
+    /**
      * 判定一条内容的分类。
      *
      * @param content 待判定内容

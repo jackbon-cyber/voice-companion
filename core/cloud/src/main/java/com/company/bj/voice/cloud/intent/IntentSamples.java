@@ -120,7 +120,19 @@ public final class IntentSamples {
     }
 
     /**
-     * 返回意图可读名称表。
+     * 返回意图示例句库的全部示例句。
+     *
+     * <p>与 {@link #samples()} 同理：暴露出来供评测集做语料交集检查，
+     * 避免测试里抄一份会过期的拷贝。
+     *
+     * @return 全部示例句
+     */
+    public static java.util.List<String> keywords() {
+        return SAMPLES.values().stream().flatMap(java.util.List::stream).toList();
+    }
+
+    /**
+     * 返回各意图的可读名称表。
      *
      * @return 意图标识到名称的映射
      */

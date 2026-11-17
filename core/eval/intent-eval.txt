@@ -1,0 +1,15 @@
+INTENT|放首爵士给我听听|play_music
+INTENT|来点摇滚乐吧|play_music
+INTENT|把音量往上调两格|set_volume
+INTENT|声音大点，我听不清|set_volume
+INTENT|别念了，安静一下|stop_speaking
+INTENT|你能闭嘴吗|stop_speaking
+INTENT|此刻是什么时辰了|check_time
+INTENT|报一下时间|check_time
+INTENT|外面下雨了吗|weather_query
+INTENT|明天天气怎么样|weather_query
+INTENT|看一下电量还剩多少|check_device_status
+INTENT|我有点难过|emotional_support
+INTENT|最近压力好大啊|emotional_support
+INTENT|陪我聊会儿天吧|chitchat
+INTENT|在忙些什么呀|chitchat

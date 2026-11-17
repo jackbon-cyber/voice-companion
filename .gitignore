@@ -47,6 +47,16 @@ data/chroma/
 chroma_data/
 eval/reports/*.json
 
+# ===== 评测运行产物（评测集本身是源文件，必须入库）=====
+# 报告由 core/scripts/eval.ps1 每次运行重新生成，是"当次实测"的快照而非源文件。
+# 入库会让人误以为它是"某次提交的权威指标"，随代码演进即失真。
+core/eval-report.md
+core/eval-report.json
+core/eval-edge-report.md
+core/eval/*.out
+core/eval/*.out.log
+core/eval/*.err.log
+
 # ===== IDE / 系统 =====
 .idea/
 .vscode/

@@ -84,6 +84,13 @@ class MemoryUpdateServiceTest {
         }
 
         @Override
+        public int clearCurrentScope() {
+            int size = records.size();
+            records.clear();
+            return size;
+        }
+
+        @Override
         public Optional<MemoryRecord> consolidate(List<String> ids) {
             return Optional.empty();
         }

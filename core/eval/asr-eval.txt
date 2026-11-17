@@ -1,0 +1,47 @@
+# 端侧识别评测集（Python 侧执行）
+#
+# 格式：维度|噪声条件|参考文本
+#
+# 用法：把每条参考文本合成为带噪音频（16 kHz 单声道 16-bit PCM），
+#       送入 faster-whisper 识别，计算字符错误率（CER）与词错误率（WER）。
+#
+# 噪声条件说明：
+#   clean    —— 无噪，信噪比 30 dB
+#   mild     —— 轻度环境噪声，信噪比 20 dB
+#   noisy    —— 中度环境噪声，信噪比 10 dB
+#
+# 参考文本刻意避开意图原型示例句与记忆关键词，保证与训练语料不相交。
+# 同一个参考文本在不同噪声条件下重复出现，是有意的：
+# 它衡量的是同一条内容在不同信噪比下的识别稳定性。
+
+ASR|clean|今天天气真不错
+ASR|clean|我最近在准备期末考试
+ASR|clean|厨房里的水已经烧开了
+ASR|clean|帮我看一下明天的日程安排
+ASR|clean|这个方案我觉得还需要再改改
+ASR|clean|楼下新开了一家咖啡店
+ASR|clean|我昨天晚上没睡好
+ASR|clean|地铁三号线最近在修路
+ASR|clean|周末打算去爬一次山
+ASR|clean|孩子最近学钢琴挺认真的
+ASR|clean|刚才电话响了我没听见
+ASR|clean|冰箱里还剩几个苹果
+ASR|clean|报告我发到你邮箱了
+ASR|clean|下午三点的会议改到四点了
+
+ASR|mild|今天天气真不错
+ASR|mild|我最近在准备期末考试
+ASR|mild|厨房里的水已经烧开了
+ASR|mild|帮我看一下明天的日程安排
+ASR|mild|这个方案我觉得还需要再改改
+ASR|mild|楼下新开了一家咖啡店
+ASR|mild|我昨天晚上没睡好
+ASR|mild|地铁三号线最近在修路
+ASR|mild|周末打算去爬一次山
+ASR|mild|孩子最近学钢琴挺认真的
+
+ASR|noisy|今天天气真不错
+ASR|noisy|我最近在准备期末考试
+ASR|noisy|帮我看一下明天的日程安排
+ASR|noisy|楼下新开了一家咖啡店
+ASR|noisy|周末打算去爬一次山

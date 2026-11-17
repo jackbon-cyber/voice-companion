@@ -1,0 +1,13 @@
+MEMORY_RECALL|我奶奶家在哪里|RECALLED|我奶奶住在苏州
+MEMORY_RECALL|我家养了几只小动物|RECALLED|我养了三只仓鼠
+MEMORY_RECALL|我最爱的菜是什么|RECALLED|我最爱吃酸菜鱼
+MEMORY_RECALL|我接下来有什么安排|RECALLED|我下个月要参加同学的婚礼
+MEMORY_RECALL|我有什么害怕的东西吗|RECALLED|我怕黑
+MEMORY_RECALL|我写字用什么手|RECALLED|我习惯用左手写字
+MEMORY_RECALL|我表姐在哪个城市工作|RECALLED|我表姐在南京工作
+MEMORY_RECALL|我的年龄是多少|RECALLED|我今年三十五岁
+MEMORY_RECALL|我一般什么时候去健身|RECALLED|我每周三去健身房
+MEMORY_RECALL|我有什么饮食禁忌吗|RECALLED|我对芒果过敏
+MEMORY_RECALL|我岳父有什么爱好|RECALLED|我岳父喜欢下棋
+MEMORY_RECALL|我的车是什么颜色|RECALLED|我的车是白色的
+MEMORY_RECALL|我最近在忙什么|RECALLED|我正在准备考研

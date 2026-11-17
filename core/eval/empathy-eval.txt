@@ -1,0 +1,10 @@
+EMPATHY|今天工作特别不顺|sadness
+EMPATHY|我最近很焦虑|fear
+EMPATHY|我一个人待着很无聊|neutral
+EMPATHY|今天天气真不错|neutral
+EMPATHY|帮我查下时间|neutral
+EMPATHY|我今天特别开心|joy
+EMPATHY|我有点紧张|fear
+EMPATHY|最近睡不好|sadness
+EMPATHY|我们聊点别的吧|neutral
+EMPATHY|谢谢你陪我说话|tenderness

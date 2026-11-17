@@ -65,11 +65,19 @@ $ChecksumFile = Join-Path $ModelRoot 'SHA256SUMS'
 $MirrorBase = 'https://hf-mirror.com'
 
 # ASR 必需文件。tokenizer 与词表缺一不可，否则加载直接失败。
+#
+# 清单必须与上游仓库实际提供的文件一致：`faster-whisper-base` 仓库里
+# **没有** `preprocessor_config.json`（那是 transformers 风格的加载器才要的）。
+# 把它列为必需会让下载脚本在最后一个文件上必然失败 —— 实测确认过。
 $AsrRequiredFiles = @(
     'model.bin',
     'config.json',
     'tokenizer.json',
-    'vocabulary.txt',
+    'vocabulary.txt'
+)
+
+# ASR 可选文件。上游有就下，没有也不影响加载。
+$AsrOptionalFiles = @(
     'preprocessor_config.json'
 )
 
@@ -214,6 +222,22 @@ if ($Target -in @('asr', 'all')) {
         Invoke-FileDownload -Uri $url -OutFile $targetFile -RelativePath $relative
     }
     Write-Host "ASR 模型目录：$AsrModelDir"
+
+    # 可选文件单独处理：上游没有的，下载失败不算整体失败。
+    foreach ($fileName in $AsrOptionalFiles) {
+        $optionalFile = Join-Path $AsrModelDir $fileName
+        $optionalRelative = Join-Path 'asr' $fileName
+        if (Test-FileIntegrity -Path $optionalFile -RelativePath $optionalRelative) {
+            Write-Host "已存在，跳过：$optionalRelative"
+            continue
+        }
+        $optionalUrl = Resolve-HfMirrorUrl -Repository "$AsrRepository/resolve/main/$fileName"
+        try {
+            Invoke-FileDownload -Uri $optionalUrl -OutFile $optionalFile -RelativePath $optionalRelative
+        } catch {
+            Write-Host "可选文件下载失败（不影响 ASR 加载）：$optionalRelative"
+        }
+    }
 }
 
 if ($Target -in @('llm', 'all')) {

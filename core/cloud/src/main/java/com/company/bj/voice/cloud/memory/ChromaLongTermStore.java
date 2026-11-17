@@ -187,6 +187,15 @@ public class ChromaLongTermStore implements LongTermStore {
     }
 
     @Override
+    public int clearCurrentScope() {
+        MemoryScope scope = resolver.current();
+        // 按作用域物理删除：连已归档记录一并清掉，让状态真正回到初始。
+        // 删除条件里绝不能带 archived —— 否则归档记录会残留，
+        // 记录总数持续增长，"已清空"就成了假象。
+        return chroma.deleteByWhere(resolveCollectionId(), buildScopeOnlyWhere(scope));
+    }
+
+    @Override
     public Optional<MemoryRecord> consolidate(List<String> ids) {
         MemoryScope scope = resolver.current();
         if (ids == null || ids.isEmpty()) {
@@ -241,6 +250,24 @@ public class ChromaLongTermStore implements LongTermStore {
         conditions.add(equality(METADATA_SCOPE_TENANT, scope.tenantId()));
         conditions.add(equality(METADATA_SCOPE_OWNER, scope.ownerKey()));
         conditions.add(equality(METADATA_ARCHIVED, archivedState));
+        Map<String, Object> where = new LinkedHashMap<>(1);
+        where.put(OPERATOR_AND, conditions);
+        return where;
+    }
+
+    /**
+     * 构造<b>只按作用域</b>过滤的条件，不区分归档状态。
+     *
+     * <p>与 {@link #buildScopeWhere} 的差别在于少了 {@code archived} 条件 ——
+     * "清空本作用域"意味着连已归档的记录一并清掉。
+     *
+     * @param scope 作用域
+     * @return where 表达式
+     */
+    private Map<String, Object> buildScopeOnlyWhere(MemoryScope scope) {
+        List<Map<String, Object>> conditions = new ArrayList<>(2);
+        conditions.add(equality(METADATA_SCOPE_TENANT, scope.tenantId()));
+        conditions.add(equality(METADATA_SCOPE_OWNER, scope.ownerKey()));
         Map<String, Object> where = new LinkedHashMap<>(1);
         where.put(OPERATOR_AND, conditions);
         return where;

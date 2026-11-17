@@ -85,6 +85,9 @@ public class ChromaClient {
     /** 响应字段名：记录条数。 */
     private static final String FIELD_COUNT = "count";
 
+    /** 响应字段名：删除操作报告的删除条数。 */
+    private static final String FIELD_DELETED = "deleted";
+
     /** 响应字段名：命中距离。 */
     private static final String FIELD_DISTANCES = "distances";
 
@@ -374,17 +377,24 @@ public class ChromaClient {
      * 因此删除一个文档的全部切片无需先把切片 id 拉回应用层 ——
      * 省掉一次全量读，也避免「读了切片 id 但删除前集合已变」的竞态。
      *
+     * <p><b>返回服务端报告的实际删除条数</b>：服务端响应形如
+     * {@code {"deleted": 2}}。调用方需要这个数字来确认清理是否真的生效 ——
+     * "以为清干净了但其实没删掉"是比"没清理"更危险的状态。
+     *
      * @param collectionId 集合 id
      * @param where        元数据过滤条件，为 {@code null} 时不向服务端发送该字段
+     * @return 服务端报告的删除条数
      * @throws ChromaException 服务端返回非 2xx、连接失败或响应体无法解析
      */
-    public void deleteByWhere(String collectionId, Map<String, Object> where) {
+    public int deleteByWhere(String collectionId, Map<String, Object> where) {
         Map<String, Object> payload = new LinkedHashMap<>();
         if (where != null) {
             payload.put(FIELD_WHERE, where);
         }
 
-        exchange("POST", collectionPath(collectionId) + SUB_PATH_DELETE, payload);
+        JsonNode body = exchange("POST", collectionPath(collectionId) + SUB_PATH_DELETE, payload);
+        JsonNode deleted = body.get(FIELD_DELETED);
+        return deleted == null || deleted.isNull() ? 0 : deleted.asInt();
     }
 
     /**
