@@ -23,6 +23,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <spring-boot.version>3.3.5</spring-boot.version>
         <json-schema-validator.version>1.5.6</json-schema-validator.version>
+        <agentscope.version>2.0.4</agentscope.version>
     </properties>
 
     <dependencyManagement>
@@ -65,6 +66,18 @@
             <groupId>com.networknt</groupId>
             <artifactId>json-schema-validator</artifactId>
             <version>${json-schema-validator.version}</version>
+        </dependency>
+
+        <!--
+          AgentScope 核心契约。本工程只用它的消息模型（Msg）与记忆契约（LongTermMemory），
+          把多智能体编排的接口形态与上游对齐；不引入它的模型扩展（dashscope / openai /
+          ollama），那些在本工程的原型分类路线下用不上，且会拖慢离线构建。
+          版本显式锁定，与 design.md 的 D3 一致。
+        -->
+        <dependency>
+            <groupId>io.agentscope</groupId>
+            <artifactId>agentscope-core</artifactId>
+            <version>${agentscope.version}</version>
         </dependency>
 
         <dependency>
