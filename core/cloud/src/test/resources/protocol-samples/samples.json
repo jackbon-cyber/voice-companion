@@ -257,6 +257,52 @@
         "confidence": 1.5,
         "handledLocally": true
       }
+    },
+    {
+      "schema": "intent-report",
+      "valid": true,
+      "note": "携带识别原话",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 7,
+        "intent": "chat",
+        "confidence": 0.8,
+        "handledLocally": false,
+        "text": "我妈妈叫李芳"
+      }
+    },
+    {
+      "schema": "intent-report",
+      "valid": false,
+      "note": "原话不是字符串",
+      "payload": {
+        "sessionId": "s1",
+        "sequence": 8,
+        "intent": "chat",
+        "confidence": 0.8,
+        "handledLocally": false,
+        "text": 123
+      }
+    },
+    {
+      "schema": "session",
+      "valid": true,
+      "note": "会话开始并携带用户标识",
+      "payload": {
+        "sessionId": "s1",
+        "type": "begin",
+        "ownerKey": "user-a"
+      }
+    },
+    {
+      "schema": "session",
+      "valid": false,
+      "note": "用户标识为空串",
+      "payload": {
+        "sessionId": "s1",
+        "type": "begin",
+        "ownerKey": ""
+      }
     }
   ]
 }

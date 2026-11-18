@@ -1,7 +1,9 @@
 package com.company.bj.voice.cloud.session;
 
 import com.company.bj.voice.cloud.downlink.DownlinkPublisher;
+import com.company.bj.voice.cloud.memory.companion.SessionMemoryOrchestrator;
 import com.company.bj.voice.cloud.reply.DownlinkReplyService;
+import com.company.bj.voice.cloud.reply.MemoryGroundedReplyService;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,20 +39,32 @@ public class SessionWebSocketHandler extends TextWebSocketHandler {
     /** 下行回复编排服务。 */
     private final DownlinkReplyService downlinkReplyService;
 
+    /** 记忆编排服务。 */
+    private final SessionMemoryOrchestrator memoryOrchestrator;
+
+    /** 记忆支撑的回复生成服务。 */
+    private final MemoryGroundedReplyService groundedReplyService;
+
     /**
      * 构造处理器。
      *
      * @param sessionLifecycleService 会话生命周期服务
      * @param downlinkPublisher 下行发布器
      * @param downlinkReplyService 下行回复编排服务
+     * @param memoryOrchestrator 记忆编排服务
+     * @param groundedReplyService 记忆支撑的回复生成服务
      */
     public SessionWebSocketHandler(
             SessionLifecycleService sessionLifecycleService,
             DownlinkPublisher downlinkPublisher,
-            DownlinkReplyService downlinkReplyService) {
+            DownlinkReplyService downlinkReplyService,
+            SessionMemoryOrchestrator memoryOrchestrator,
+            MemoryGroundedReplyService groundedReplyService) {
         this.sessionLifecycleService = sessionLifecycleService;
         this.downlinkPublisher = downlinkPublisher;
         this.downlinkReplyService = downlinkReplyService;
+        this.memoryOrchestrator = memoryOrchestrator;
+        this.groundedReplyService = groundedReplyService;
     }
 
     @Override
@@ -73,7 +87,12 @@ public class SessionWebSocketHandler extends TextWebSocketHandler {
     }
 
     /**
-     * 若上行消息是意图报告，则下发一条回复。
+     * 若上行消息是意图报告，则写入记忆并下发一条回复。
+     *
+     * <p>回复内容来自 {@link MemoryGroundedReplyService}：
+     * 它按当前会话的用户作用域召回记忆，并把命中的记忆标识放进
+     * 协议的 {@code citations} 字段 —— 这让「不同用户的记忆互不可见」
+     * 成为可机器断言的事实，而不是只能靠人读回复去判断。
      *
      * @param session WebSocket 会话
      * @param payload 上行消息 JSON 文本
@@ -88,7 +107,24 @@ public class SessionWebSocketHandler extends TextWebSocketHandler {
         }
         String intent = extractField(payload, "intent");
         boolean handledLocally = payload.contains("\"handledLocally\":true");
-        downlinkReplyService.replyToIntent(session, protocolSessionId, intent, handledLocally);
+        String text = extractField(payload, "text");
+
+        // 记忆写入发生在**回复之前**：这一轮说的话要先落库，
+        // 下一轮才能召回它。顺序颠倒会让用户永远慢一轮才被"记住"。
+        if (text != null && !text.isBlank()) {
+            try {
+                memoryOrchestrator.remember(protocolSessionId, text);
+            } catch (RuntimeException error) {
+                // 记忆写失败不应让这一轮回复失败 ——
+                // 用户仍然需要听到回话，记忆可以下一轮补上。
+                LOGGER.warn("记忆写入失败，已忽略：{}", error.getMessage());
+            }
+        }
+
+        MemoryGroundedReplyService.GroundedReply grounded =
+                groundedReplyService.reply(protocolSessionId, text == null ? "" : text);
+
+        downlinkReplyService.replyGrounded(session, protocolSessionId, intent, handledLocally, grounded);
     }
 
     /**
@@ -132,7 +168,7 @@ public class SessionWebSocketHandler extends TextWebSocketHandler {
      *
      * @param payload JSON 文本
      * @param fieldName 字段名
-     * @return 字段值；未找到时为 null
+     * @return 字段值；未找到时返回 null
      */
     private String extractField(String payload, String fieldName) {
         java.util.regex.Matcher matcher =

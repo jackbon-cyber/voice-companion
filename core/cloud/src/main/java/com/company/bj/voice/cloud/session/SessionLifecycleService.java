@@ -1,5 +1,7 @@
 package com.company.bj.voice.cloud.session;
 
+import com.company.bj.voice.cloud.memory.MemoryScope;
+import com.company.bj.voice.cloud.memory.SessionOwnerRegistry;
 import com.company.bj.voice.cloud.protocol.ProtocolValidator;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -20,6 +22,10 @@ import org.springframework.stereotype.Service;
  *
  * <p>本类属于 Service 层，只依赖 {@link SessionRegistry} 与
  * {@link ProtocolValidator}，不依赖任何 Repository。
+ *
+ * <p><b>会话归属</b>：会话开始消息携带的 {@code ownerKey} 决定该会话的用户身份，
+ * 记忆作用域由它推导。没有它，云端写的记忆全部落进同一个作用域，
+ * 「不同用户互不可见」就不成立。
  */
 @Service
 public class SessionLifecycleService {
@@ -33,6 +39,9 @@ public class SessionLifecycleService {
     /** 协议校验器。 */
     private final ProtocolValidator protocolValidator;
 
+    /** 会话归属注册表。 */
+    private final SessionOwnerRegistry ownerRegistry;
+
     /** JSON 解析器。 */
     private final ObjectMapper objectMapper;
 
@@ -44,10 +53,14 @@ public class SessionLifecycleService {
      *
      * @param sessionRegistry 会话注册表
      * @param protocolValidator 协议校验器
+     * @param ownerRegistry 会话归属注册表
      */
     @Autowired
-    public SessionLifecycleService(SessionRegistry sessionRegistry, ProtocolValidator protocolValidator) {
-        this(sessionRegistry, protocolValidator, Clock.systemUTC());
+    public SessionLifecycleService(
+            SessionRegistry sessionRegistry,
+            ProtocolValidator protocolValidator,
+            SessionOwnerRegistry ownerRegistry) {
+        this(sessionRegistry, protocolValidator, ownerRegistry, Clock.systemUTC());
     }
 
     /**
@@ -55,12 +68,17 @@ public class SessionLifecycleService {
      *
      * @param sessionRegistry 会话注册表
      * @param protocolValidator 协议校验器
+     * @param ownerRegistry 会话归属注册表
      * @param clock 时钟
      */
     public SessionLifecycleService(
-            SessionRegistry sessionRegistry, ProtocolValidator protocolValidator, Clock clock) {
+            SessionRegistry sessionRegistry,
+            ProtocolValidator protocolValidator,
+            SessionOwnerRegistry ownerRegistry,
+            Clock clock) {
         this.sessionRegistry = sessionRegistry;
         this.protocolValidator = protocolValidator;
+        this.ownerRegistry = ownerRegistry;
         this.clock = clock;
         this.objectMapper = new ObjectMapper();
     }
@@ -69,14 +87,19 @@ public class SessionLifecycleService {
      * 处理会话开始消息：注册会话并绑定处理单元。
      *
      * @param sessionId 会话标识
+     * @param ownerKey  会话归属的用户标识；为空时使用缺省作用域
      * @return 该会话绑定的处理单元标识
      * @throws SessionRoutingException 会话标识为空时抛出
      */
-    public String onSessionBegin(String sessionId) {
+    public String onSessionBegin(String sessionId, String ownerKey) {
         String unitId = sessionRegistry.resolveUnit(sessionId);
         sessionRegistry.register(
                 sessionId, new SessionContext(sessionId, unitId, clock.millis()));
-        LOGGER.info("会话已注册：{} → 处理单元 {}", sessionId, unitId);
+        if (ownerKey != null && !ownerKey.isBlank()) {
+            ownerRegistry.bind(sessionId, ownerKey);
+        }
+        LOGGER.info("会话已注册：{} → 处理单元 {}，用户={}", sessionId, unitId,
+                ownerKey == null || ownerKey.isBlank() ? "缺省" : ownerKey);
         return unitId;
     }
 
@@ -101,12 +124,26 @@ public class SessionLifecycleService {
     /**
      * 处理会话结束消息：回收会话。
      *
+     * <p>同时解除用户绑定：绑定残留会让下一个复用同一会话标识的会话
+     * 继承前一个用户的身份，从而读到前一个用户的记忆。
+     *
      * @param sessionId 会话标识
      * @param reason 结束原因
      */
     public void onSessionEnd(String sessionId, String reason) {
         sessionRegistry.remove(sessionId);
+        ownerRegistry.unbind(sessionId);
         LOGGER.info("会话已回收：{}（原因：{}）", sessionId, reason);
+    }
+
+    /**
+     * 解析会话对应的记忆作用域。
+     *
+     * @param sessionId 会话标识
+     * @return 记忆作用域
+     */
+    public MemoryScope scopeOf(String sessionId) {
+        return ownerRegistry.scopeOf(sessionId);
     }
 
     /**
@@ -116,6 +153,7 @@ public class SessionLifecycleService {
      */
     public void onHeartbeatTimeout(String sessionId) {
         sessionRegistry.onHeartbeatTimeout(sessionId);
+        ownerRegistry.unbind(sessionId);
     }
 
     /**
@@ -158,7 +196,7 @@ public class SessionLifecycleService {
         String sessionId = node.path("sessionId").asText();
         String type = node.path("type").asText();
         switch (type) {
-            case "begin" -> onSessionBegin(sessionId);
+            case "begin" -> onSessionBegin(sessionId, node.path("ownerKey").asText(""));
             case "keepalive" -> onKeepalive(sessionId);
             case "end" -> onSessionEnd(sessionId, node.path("reason").asText(""));
             default -> LOGGER.debug("未知的会话消息类型：{}", type);

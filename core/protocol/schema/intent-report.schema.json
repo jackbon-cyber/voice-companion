@@ -30,6 +30,10 @@
       "type": "boolean",
       "description": "该意图是否已在端侧执行。为 false 时由云端执行。"
     },
+    "text": {
+      "type": "string",
+      "description": "端侧识别出的用户原话。云端据此写入长期记忆与做召回 —— 没有它，云端只拿到意图标识，无法记住用户说过的话。"
+    },
     "slots": {
       "type": "object",
       "description": "意图参数。",

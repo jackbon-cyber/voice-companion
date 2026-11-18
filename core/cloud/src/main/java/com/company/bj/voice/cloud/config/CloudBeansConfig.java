@@ -2,8 +2,22 @@ package com.company.bj.voice.cloud.config;
 
 import com.company.bj.voice.cloud.auth.HandshakeAuthInterceptor;
 import com.company.bj.voice.cloud.auth.TokenAuthenticator;
+import com.company.bj.voice.cloud.chroma.ChromaClient;
 import com.company.bj.voice.cloud.downlink.DownlinkPublisher;
+import com.company.bj.voice.cloud.embed.EmbeddingService;
+import com.company.bj.voice.cloud.embed.LocalEmbeddingService;
+import com.company.bj.voice.cloud.memory.ChromaLongTermStore;
+import com.company.bj.voice.cloud.memory.LongTermStore;
+import com.company.bj.voice.cloud.memory.MemoryScope;
+import com.company.bj.voice.cloud.memory.ScopeResolver;
+import com.company.bj.voice.cloud.memory.SessionOwnerRegistry;
+import com.company.bj.voice.cloud.memory.companion.CompanionMemoryClassifier;
+import com.company.bj.voice.cloud.memory.companion.FingerprintCalculator;
+import com.company.bj.voice.cloud.memory.companion.MemoryUpdateService;
+import com.company.bj.voice.cloud.memory.companion.ScopedCompanionMemoryStore;
+import com.company.bj.voice.cloud.memory.companion.SessionMemoryOrchestrator;
 import com.company.bj.voice.cloud.protocol.ProtocolValidator;
+import com.company.bj.voice.cloud.reply.MemoryGroundedReplyService;
 import com.company.bj.voice.cloud.session.ProcessingUnitDirectory;
 import com.company.bj.voice.cloud.session.SessionRegistry;
 import com.company.bj.voice.cloud.session.SessionReroutingService;
@@ -127,5 +141,123 @@ public class CloudBeansConfig {
     @Bean
     public Clock clock() {
         return Clock.systemUTC();
+    }
+
+    /**
+     * 构造作用域解析器。
+     *
+     * @return 作用域解析器
+     */
+    @Bean
+    public ScopeResolver scopeResolver() {
+        return new ScopeResolver();
+    }
+
+    /**
+     * 构造会话归属注册表。
+     *
+     * @return 会话归属注册表
+     */
+    @Bean
+    public SessionOwnerRegistry sessionOwnerRegistry() {
+        return new SessionOwnerRegistry(MemoryScope.DEFAULT_TENANT_ID);
+    }
+
+    /**
+     * 构造长期记忆存储。
+     *
+     * <p>依赖 Chroma 与本地嵌入服务。两者不可用时**不阻止应用启动** ——
+     * 启动失败会让"克隆下来就能跑"不成立；记忆不可用时，
+     * 上行链路仍能建立会话并下发回复，只是不带记忆引用。
+     *
+     * @param chromaProperties Chroma 配置
+     * @param embeddingProperties 嵌入配置
+     * @param scopeResolver 作用域解析器
+     * @return 长期记忆存储
+     */
+    @Bean
+    public LongTermStore longTermStore(
+            ChromaProperties chromaProperties,
+            EmbeddingProperties embeddingProperties,
+            ScopeResolver scopeResolver) {
+        ChromaClient chroma = new ChromaClient(
+                chromaProperties,
+                java.net.http.HttpClient.newHttpClient(),
+                new com.fasterxml.jackson.databind.ObjectMapper());
+        EmbeddingService embeddings = new LocalEmbeddingService(embeddingProperties);
+        return new ChromaLongTermStore(chroma, embeddings, chromaProperties, scopeResolver);
+    }
+
+    /**
+     * 构造陪伴域长期记忆存储。
+     *
+     * <p><b>隔离由这一层强制施加</b>：它包在底层存储之外，
+     * 读出后再校验一次归属 —— 即使底层实现有疏漏，越权记录也到不了上层。
+     *
+     * @param longTermStore 底层长期记忆存储
+     * @param scopeResolver 作用域解析器
+     * @return 陪伴域长期记忆存储
+     */
+    @Bean
+    public ScopedCompanionMemoryStore scopedCompanionMemoryStore(
+            LongTermStore longTermStore,
+            ScopeResolver scopeResolver) {
+        return new ScopedCompanionMemoryStore(longTermStore, scopeResolver);
+    }
+
+    /**
+     * 构造记忆分类器。
+     *
+     * @return 记忆分类器
+     */
+    @Bean
+    public CompanionMemoryClassifier companionMemoryClassifier() {
+        return new CompanionMemoryClassifier();
+    }
+
+    /**
+     * 构造记忆更新服务。
+     *
+     * @param scopedCompanionMemoryStore 陪伴域长期记忆存储
+     * @return 记忆更新服务
+     */
+    @Bean
+    public MemoryUpdateService memoryUpdateService(
+            ScopedCompanionMemoryStore scopedCompanionMemoryStore) {
+        return new MemoryUpdateService(scopedCompanionMemoryStore, FingerprintCalculator.lexical());
+    }
+
+    /**
+     * 构造会话记忆编排服务。
+     *
+     * @param scopedCompanionMemoryStore 陪伴域长期记忆存储
+     * @param scopeResolver 作用域解析器
+     * @param sessionOwnerRegistry 会话归属注册表
+     * @param classifier 记忆分类器
+     * @param updateService 记忆更新服务
+     * @return 会话记忆编排服务
+     */
+    @Bean
+    public SessionMemoryOrchestrator sessionMemoryOrchestrator(
+            ScopedCompanionMemoryStore scopedCompanionMemoryStore,
+            ScopeResolver scopeResolver,
+            SessionOwnerRegistry sessionOwnerRegistry,
+            CompanionMemoryClassifier classifier,
+            MemoryUpdateService updateService) {
+        return new SessionMemoryOrchestrator(
+                scopedCompanionMemoryStore, scopeResolver, sessionOwnerRegistry,
+                classifier, updateService);
+    }
+
+    /**
+     * 构造记忆支撑的回复生成服务。
+     *
+     * @param orchestrator 记忆编排服务
+     * @return 回复生成服务
+     */
+    @Bean
+    public MemoryGroundedReplyService memoryGroundedReplyService(
+            SessionMemoryOrchestrator orchestrator) {
+        return new MemoryGroundedReplyService(orchestrator);
     }
 }

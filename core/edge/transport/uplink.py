@@ -42,16 +42,25 @@ class UplinkAuthError(UplinkError):
 class UplinkClient:
     """端侧上行通道客户端。"""
 
-    def __init__(self, session_id: str, base_url: str, token: str | None = None) -> None:
+    def __init__(
+        self,
+        session_id: str,
+        base_url: str,
+        token: str | None = None,
+        owner_key: str | None = None,
+    ) -> None:
         """构造上行客户端。
 
         @param session_id 会话标识。**重连时必须保持不变**，否则云端会当作新会话。
         @param base_url WebSocket 服务地址
         @param token 接入凭据；为 None 时不带凭据（云端未启用鉴权时用）
+        @param owner_key 会话归属的用户标识。云端据此绑定记忆作用域 ——
+            没有它，云端写的记忆全部落进同一个作用域，跨用户隔离无从谈起。
         """
         self._session_id = session_id
         self._base_url = base_url
         self._token = token
+        self._owner_key = owner_key
         self._sequence = 0
         self._format: AudioFormat | None = None
         self._connection: Any = None
@@ -64,6 +73,14 @@ class UplinkClient:
         @return 会话标识
         """
         return self._session_id
+
+    @property
+    def owner_key(self) -> str | None:
+        """会话归属的用户标识。
+
+        @return 用户标识；未设置时为 None
+        """
+        return self._owner_key
 
     @property
     def sequence(self) -> int:
@@ -202,10 +219,12 @@ class UplinkClient:
                 is_final_partial=frame.is_final_partial,
             )
 
-    async def send_intent(self, decision: IntentDecision) -> None:
+    async def send_intent(self, decision: IntentDecision, text: str = "") -> None:
         """发送一条意图判定结果。
 
         @param decision 意图判定结果
+        @param text 端侧识别出的用户原话。云端据此写入长期记忆并做召回 ——
+            没有原话，云端只拿到意图标识，无法记住用户说过的话。
         @throws UplinkError 未连接或协议校验不通过时抛出
         """
         if self._connection is None:
@@ -218,6 +237,8 @@ class UplinkClient:
             "handledLocally": decision.handled_locally,
             "slots": decision.slots,
         }
+        if text:
+            message["text"] = text
         self._validate("intent-report", message)
         self._sequence += 1
         await self._connection.send(json.dumps(message, ensure_ascii=False))
@@ -242,6 +263,8 @@ class UplinkClient:
         }
         if negotiated is not None:
             message["audioFormat"] = negotiated.to_payload()
+        if self._owner_key:
+            message["ownerKey"] = self._owner_key
         self._validate("session", message)
         await self._connection.send(json.dumps(message, ensure_ascii=False))
 

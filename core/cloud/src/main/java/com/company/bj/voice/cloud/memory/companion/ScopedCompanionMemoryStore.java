@@ -26,7 +26,7 @@ import java.util.Optional;
  * <p>第三道防线是"纵深防御"：前两道防的是调用方犯错，第三道防的是实现出错。
  * 成本极低，收益是隔离性不依赖单一环节的正确性。
  */
-public class ScopedCompanionMemoryStore {
+public class ScopedCompanionMemoryStore implements LongTermStore {
 
     /** 底层长期记忆存储。 */
     private final LongTermStore delegate;
@@ -52,9 +52,24 @@ public class ScopedCompanionMemoryStore {
      * @return 写入后的记录
      * @throws IllegalStateException 当前没有活动作用域时抛出
      */
+    @Override
     public MemoryRecord remember(String content) {
         requireScope();
         return delegate.remember(content);
+    }
+
+    /**
+     * 写入一条记忆并指定权重。
+     *
+     * @param content 记忆内容
+     * @param weight  权重
+     * @return 写入后的记录
+     * @throws IllegalStateException 当前没有活动作用域时抛出
+     */
+    @Override
+    public MemoryRecord remember(String content, double weight) {
+        requireScope();
+        return delegate.remember(content, weight);
     }
 
     /**
@@ -122,6 +137,34 @@ public class ScopedCompanionMemoryStore {
     public List<MemoryRecord> archived(int topK) {
         requireScope();
         return filterByScope(delegate.archived(topK));
+    }
+
+    /**
+     * 清除当前作用域下的全部记忆（含已归档记录）。
+     *
+     * <p><b>隔离由存储层强制</b>：本方法只清除当前作用域的记录，
+     * 绝不会影响其他租户/主体的数据。
+     *
+     * @return 被清除的记录数
+     * @throws IllegalStateException 当前没有活动作用域时抛出
+     */
+    @Override
+    public int clearCurrentScope() {
+        requireScope();
+        return delegate.clearCurrentScope();
+    }
+
+    /**
+     * 把多条长期记忆归并为一条新记录。
+     *
+     * @param ids 待归并的记录标识列表
+     * @return 归并产生的新记录
+     * @throws IllegalStateException 当前没有活动作用域时抛出
+     */
+    @Override
+    public Optional<MemoryRecord> consolidate(List<String> ids) {
+        requireScope();
+        return delegate.consolidate(ids);
     }
 
     /**

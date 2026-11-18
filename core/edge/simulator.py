@@ -151,6 +151,19 @@ class EdgeSimulator:
     #: 每轮结束后等待下行消息到达的秒数。
     DOWNLINK_DRAIN_SECONDS = 0.3
 
+    #: 等待云端回复的**最长**秒数。
+    #:
+    #: 为什么需要"等回复"而不是"睡固定时长"：云端回复的耗时随链路而变 ——
+    #: 有记忆召回时要走嵌入与向量检索，可能好几秒。
+    #: 睡固定 0.3 秒会让**所有**较慢的回复被系统性地漏掉，
+    #: 表现为"云端明明回了，端侧却当没收到"。
+    #: 指标采集同样受影响：漏掉回复就没有往返耗时样本，
+    #: 而缺失的指标在报告里会被标成"未覆盖"，白白丢掉真实可测的量。
+    REPLY_WAIT_TIMEOUT_SECONDS = 30.0
+
+    #: 收到回复后再多等一会儿，让同一轮的其余下行消息（如语音片段）到达。
+    POST_REPLY_SETTLE_SECONDS = 0.3
+
     #: 本地应答的来源标识。与云端回复区分开，不得混为一谈。
     LOCAL_REPLY_SOURCE = "LOCAL"
 
@@ -162,6 +175,7 @@ class EdgeSimulator:
         phrases: list[str] | None = None,
         dialog_engine: LocalDialogEngine | None = None,
         token: str | None = None,
+        owner_key: str | None = None,
     ) -> None:
         """构造模拟端。
 
@@ -171,12 +185,19 @@ class EdgeSimulator:
         @param phrases 模拟源依次"说"出的语句
         @param dialog_engine 本地对话引擎；为 None 时用话术库
         @param token 接入凭据；为 None 时不带凭据
+        @param owner_key 会话归属的用户标识。云端据此绑定记忆作用域 ——
+            没有它，云端写的记忆全部落进同一个作用域，跨用户隔离无从谈起。
         """
         self._session_id = session_id
         self._cloud_url = cloud_url
         self._format = audio_format
         self._phrases = phrases or ["把音量调到五十", "今天发生了好多事情啊"]
-        self._client = UplinkClient(session_id=session_id, base_url=cloud_url, token=token)
+        self._client = UplinkClient(
+            session_id=session_id,
+            base_url=cloud_url,
+            token=token,
+            owner_key=owner_key,
+        )
         self._vad = VoiceActivityDetector()
         self._segmenter = SentenceSegmenter(
             end_silence_ms=600,
@@ -199,6 +220,10 @@ class EdgeSimulator:
         self._local_replies: list[LocalReply] = []
         #: 最近一次上行请求发出的时刻（单调时钟）。为 None 表示当前没有在等下行。
         self._request_sent_at: float | None = None
+        #: 下行消息观察者。端到端验证用它读取引用来源。
+        self._downlink_observer: Callable[[object], None] | None = None
+        #: 本轮是否已收到下行回复。等待方据此判断"可以继续了"。
+        self._reply_arrived = False
 
     @property
     def metrics(self) -> MetricsCollector:
@@ -226,6 +251,26 @@ class EdgeSimulator:
             DegradeLevel.OFFLINE,
             DegradeLevel.MINIMAL,
         )
+
+    def set_downlink_observer(self, observer: Callable[[object], None] | None) -> None:
+        """设置下行消息观察者。
+
+        @param observer 观察者；为 None 时取消观察
+        """
+        self._downlink_observer = observer
+
+    def set_scripted_phrases(self, phrases: list[str]) -> None:
+        """替换识别脚本。
+
+        端到端验证需要**逐轮控制**用户说什么 ——
+        同一个模拟端实例里，第一轮说"我妈妈叫李芳"，
+        第二轮说"我妈妈叫什么"，两轮必须分别可控。
+
+        @param phrases 依次"说"出的语句
+        """
+        self._phrases = list(phrases)
+        self._source = SimulatedAudioSource(self._phrases, self._format)
+        self._recognizer = ScriptedRecognizer(self._phrases)
 
 
     async def run(self, rounds: int = 2) -> None:
@@ -264,7 +309,7 @@ class EdgeSimulator:
         try:
             for round_index in range(rounds):
                 await self._run_round(round_index)
-                await self._drain_downlink()
+                await self._wait_for_reply(round_index)
         finally:
             receiver.cancel()
             await self._client.send_session_end("simulator_finished")
@@ -324,8 +369,18 @@ class EdgeSimulator:
 
         @param message 下行消息
         """
+        # 观察者先于业务处理拿到消息：端到端验证需要在状态机变更之前
+        # 看到原始消息内容（含引用来源）。
+        if self._downlink_observer is not None:
+            try:
+                self._downlink_observer(message)
+            except Exception as error:  # noqa: BLE001 - 观察者不应影响主流程
+                LOGGER.warning("下行观察者异常，已忽略：%s", error)
+
         if isinstance(message, TextReply):
             LOGGER.info("收到云端回复：%r（情感=%s）", message.text, message.emotion)
+            # 通知等待方：本轮的回复已经到了。
+            self._reply_arrived = True
             # 文本回复也是用户感知的"开始响应"时刻。
             # 首包延迟若只在语音片段上统计，云端只发文本时就永远没有样本 ——
             # 而指标缺失会被报告标成"未覆盖"，白白丢掉一个真实可测的量。
@@ -346,6 +401,9 @@ class EdgeSimulator:
             if message.is_last:
                 self._record_round_trip()
                 self._state_machine.on_playback_finished(self._clock_ms)
+            # 语音链路的最后一片也算"本轮有回复"——
+            # 云端下发语音而不是文本时，等待方同样需要被唤醒。
+            self._reply_arrived = True
 
     async def _drain_downlink(self) -> None:
         """等待一小段时间，把已到达的下行消息处理掉。
@@ -353,6 +411,42 @@ class EdgeSimulator:
         @param 无
         """
         await asyncio.sleep(self.DOWNLINK_DRAIN_SECONDS)
+
+    async def _wait_for_reply(self, round_index: int) -> None:
+        """等待本轮的下行回复到达。
+
+        **为什么不能睡固定时长**：云端回复的耗时随链路而变 ——
+        走记忆召回时要经过嵌入与向量检索，可能好几秒。
+        睡固定 0.3 秒会让**所有**较慢的回复被系统性地漏掉，
+        表现为"云端明明回了，端侧却当没收到"；
+        指标采集同样受影响 —— 漏掉回复就没有往返耗时样本，
+        而缺失的指标在报告里会被标成"未覆盖"，白白丢掉真实可测的量。
+
+        因此这里等到**真的收到一条回复**为止，只在超时后才放弃。
+        超时放弃而不是无限等待：云端挂住时不能让整个流程卡死。
+
+        @param round_index 轮次序号
+        """
+        if self._request_sent_at is None:
+            # 本轮没有上行（例如意图在端侧本地处理），只需短暂排空下行。
+            await self._drain_downlink()
+            return
+
+        deadline = time.perf_counter() + self.REPLY_WAIT_TIMEOUT_SECONDS
+        while time.perf_counter() < deadline:
+            if self._reply_arrived:
+                self._reply_arrived = False
+                # 收到回复后再等一小会儿，让同一轮的其余下行消息到达。
+                await asyncio.sleep(self.POST_REPLY_SETTLE_SECONDS)
+                return
+            await asyncio.sleep(0.02)
+
+        LOGGER.warning(
+            "第 %d 轮：等待云端回复超时（%.0f 秒），按未收到处理",
+            round_index + 1,
+            self.REPLY_WAIT_TIMEOUT_SECONDS,
+        )
+        self._request_sent_at = None
 
     async def _run_round(self, round_index: int) -> None:
         """跑一轮。
@@ -440,7 +534,8 @@ class EdgeSimulator:
                     intent="unknown",
                     confidence=result.confidence,
                     handled_locally=False,
-                )
+                ),
+                result.text,
             )
             return
 
@@ -457,7 +552,7 @@ class EdgeSimulator:
 
         if not decision.handled_locally:
             self._state_machine.on_cloud_wait_started(self._clock_ms)
-            if await self._send_intent_report(decision):
+            if await self._send_intent_report(decision, result.text):
                 # 上行成功，等云端回复。
                 return
             # 上行失败且已降级到离线：不能让用户干等一个不会来的云端回复，
@@ -500,14 +595,16 @@ class EdgeSimulator:
         )
         return reply
 
-    async def _send_intent_report(self, decision: IntentDecision) -> bool:
+    async def _send_intent_report(self, decision: IntentDecision, text: str = "") -> bool:
         """上行一条意图报告。
 
         @param decision 意图判定结果
+        @param text 识别出的用户原话。云端据此写入长期记忆并做召回 ——
+            没有原话，云端只拿到意图标识，无法记住用户说过的话。
         @return 上行是否成功
         """
         try:
-            await self._client.send_intent(decision)
+            await self._client.send_intent(decision, text)
         except UplinkError as error:
             LOGGER.warning("意图上行失败：%s", error)
             self._degrade.record_uplink_failure()
@@ -541,6 +638,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="接入凭据。默认取环境变量 VOICE_UPLINK_TOKEN。",
     )
     parser.add_argument(
+        "--owner",
+        default=os.environ.get("VOICE_OWNER_KEY"),
+        help="会话归属的用户标识。默认取环境变量 VOICE_OWNER_KEY。",
+    )
+    parser.add_argument(
         "--metrics-out",
         default=None,
         help="把分段耗时报告导出到指定路径（Markdown）。",
@@ -566,6 +668,7 @@ async def main() -> None:
         cloud_url=args.url,
         phrases=args.phrase,
         token=args.token,
+        owner_key=args.owner,
     )
     try:
         await simulator.run(rounds=args.rounds)

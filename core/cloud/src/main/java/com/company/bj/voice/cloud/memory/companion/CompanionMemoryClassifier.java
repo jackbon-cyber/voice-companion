@@ -56,8 +56,24 @@ public class CompanionMemoryClassifier {
 
     /** 寒暄关键词。 */
     private static final List<String> SMALL_TALK_KEYWORDS = List.of(
-            "你好", "您好", "早上好", "晚安", "再见", "拜拜", "谢谢", "不客气",
-            "在吗", "吃了吗", "睡了", "起床", "哈哈", "呵呵", "嘿嘿");
+        "你好", "您好", "早上好", "晚安", "再见", "拜拜", "谢谢", "不客气",
+        "在吗", "吃了吗", "睡了", "起床", "哈哈", "呵呵", "嘿嘿");
+
+    /**
+     * 疑问标记。
+     *
+     * <p><b>为什么需要单独判定</b>：疑问句里也会出现关系词与偏好词 ——
+     * "我妈妈叫什么"含"我妈妈"，"我喜欢什么"含"我喜欢"。
+     * 若不剔除，它们会被当成用户陈述的事实写进长期记忆，
+     * 把**提问本身**当成记忆内容存下来。
+     *
+     * <p>后果不是"多一条噪音"而是**污染召回**：
+     * 用户问"我妈妈叫什么"，召回结果里混进"我妈妈叫什么"这条问句，
+     * 机器人会答"你说你想知道你妈妈叫什么" —— 看起来像坏了。
+     */
+    private static final List<String> QUESTION_MARKERS = List.of(
+        "什么", "谁", "为什么", "怎么", "怎样", "如何", "多少", "哪些", "哪个",
+        "吗", "呢", "？", "?");
 
     /**
      * 返回记忆分类器使用的全部关键词。
@@ -88,6 +104,12 @@ public class CompanionMemoryClassifier {
             return CompanionMemoryCategory.SMALL_TALK;
         }
         String text = content.toLowerCase(Locale.ROOT);
+
+        // 疑问句优先判定：疑问句里同样会出现关系词与偏好词，
+        // 不先剔除就会把"提问"当成"陈述的事实"写进长期记忆。
+        if (isQuestion(text)) {
+            return CompanionMemoryCategory.SMALL_TALK;
+        }
 
         if (containsAny(text, TIME_SENSITIVE_KEYWORDS)) {
             return CompanionMemoryCategory.TIME_SENSITIVE_EVENT;
@@ -151,5 +173,25 @@ public class CompanionMemoryClassifier {
         boolean hasSubject = text.contains("我") || text.contains("她") || text.contains("他");
         boolean hasStatement = RELATIONSHIP_PATTERNS.stream().anyMatch(text::contains);
         return hasSubject && hasStatement;
+    }
+
+    /**
+     * 判断文本是否是疑问句。
+     *
+     * <p>判定方式是**疑问词 + 句末语气词**的组合，不是单个疑问词 ——
+     * "我不知道"含"不"但不是疑问，"什么"本身也可能出现在陈述里
+     * （"这些东西我都知道"）。
+     *
+     * @param text 已转小写的文本
+     * @return 是疑问句返回 {@code true}
+     */
+    private boolean isQuestion(String text) {
+        boolean hasQuestionWord = containsAny(text, QUESTION_MARKERS);
+        // 句末语气词（吗/呢）是中文疑问句最可靠的信号。
+        boolean hasSentenceFinalParticle =
+                text.endsWith("吗") || text.endsWith("呢") || text.endsWith("？")
+                    || text.endsWith("?");
+        return hasQuestionWord && (hasSentenceFinalParticle || text.contains("什么")
+                || text.contains("谁") || text.contains("为什么") || text.contains("多少"));
     }
 }

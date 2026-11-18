@@ -90,4 +90,23 @@ class CompanionMemoryClassifierTest {
         // 单看"叫"会把这句判成关系事实，但"这"不是关系主体。
         assertEquals(CompanionMemoryCategory.SMALL_TALK, classifier.classify("这道菜叫水煮鱼"));
     }
+
+    @Test
+    @DisplayName("疑问句不入长期记忆")
+    void 疑问句不入长期记忆() {
+        // 疑问句里同样会出现关系词与偏好词。不剔除的话，
+        // 用户问"我妈妈叫什么"，"我妈妈叫什么"本身会被当成事实存进长期记忆，
+        // 召回时混进问句，机器人会答"你说你想知道你妈妈叫什么" —— 看起来像坏了。
+        assertFalse(classifier.shouldPersistLongTerm("我妈妈叫什么"));
+        assertFalse(classifier.shouldPersistLongTerm("我喜欢吃什么"));
+        assertFalse(classifier.shouldPersistLongTerm("我明天要做什么"));
+    }
+
+    @Test
+    @DisplayName("含疑问词的陈述句仍可入长期记忆")
+    void 含疑问词的陈述句仍可入长期记忆() {
+        // "我不知道"含"不"不是疑问；"这些东西我都知道"含"什么"但不是疑问。
+        // 疑问判定不能过宽，否则真实事实会被误丢。
+        assertTrue(classifier.shouldPersistLongTerm("我妈妈叫李芳，她很喜欢做菜"));
+    }
 }

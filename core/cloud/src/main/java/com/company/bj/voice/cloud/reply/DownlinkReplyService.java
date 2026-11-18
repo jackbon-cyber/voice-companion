@@ -68,6 +68,44 @@ public class DownlinkReplyService {
     }
 
     /**
+     * 下发一条带引用来源的回复。
+     *
+     * <p>引用来源（{@code citations}）让「这条回复依据了哪条记忆」成为
+     * 可机器断言的事实 —— 端到端脚本据此断言跨用户记忆隔离。
+     *
+     * @param webSocketSession WebSocket 连接
+     * @param protocolSessionId 协议会话标识
+     * @param intent 意图标识
+     * @param handledLocally 该意图是否已在端侧处理
+     * @param grounded 记忆支撑的回复
+     * @return 实际下发的消息数
+     */
+    public int replyGrounded(
+            WebSocketSession webSocketSession,
+            String protocolSessionId,
+            String intent,
+            boolean handledLocally,
+            MemoryGroundedReplyService.GroundedReply grounded) {
+
+        LOGGER.info("下发回复：会话={} 意图={} 本地已处理={} 引用来源={}",
+                protocolSessionId, intent, handledLocally, grounded.citations());
+
+        if (webSocketSession == null || !webSocketSession.isOpen()) {
+            LOGGER.warn("连接不可用，回复未送达：会话={}", protocolSessionId);
+            return 0;
+        }
+        try {
+            String payload = downlinkPublisher.publishText(
+                    protocolSessionId, grounded.text(), grounded.emotion(), grounded.citations());
+            webSocketSession.sendMessage(new TextMessage(payload));
+            return 1;
+        } catch (IOException | RuntimeException error) {
+            LOGGER.warn("回复下发失败：{}", error.getMessage());
+            return 0;
+        }
+    }
+
+    /**
      * 下发一条文本回复。
      *
      * @param webSocketSession WebSocket 连接
