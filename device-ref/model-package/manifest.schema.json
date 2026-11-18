@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://voice-companion/device/model-package-manifest.schema.json",
+  "title": "端侧模型包清单",
+  "description": "统一模型包的清单格式。模型包是端侧模型的分发产物：打包脚本产出它，设备端安装它。模型包格式与端云消息协议是两套独立的契约 —— 协议的演进需要两端同时升级，模型包的演进只影响打包与安装，因此两者不共用 schema。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "packageVersion",
+    "platform",
+    "models",
+    "compat",
+    "rollbackPartition",
+    "signatureAlgorithm",
+    "signatureFile"
+  ],
+  "properties": {
+    "packageVersion": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+      "description": "模型包自身的版本号，与模型版本无关。"
+    },
+    "platform": {
+      "type": "string",
+      "minLength": 1,
+      "description": "目标平台标识，例如 stm32n6 / stm32mpu257。"
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "description": "包内模型清单。不得为空 —— 空包没有安装价值。",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version", "file", "size", "sha256", "minRuntime"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "模型标识，设备端按此选择加载哪一个模型。"
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "description": "模型版本号。用于版本台账与回滚点定位。"
+          },
+          "file": {
+            "type": "string",
+            "pattern": "^models/[^/\\\\]+$",
+            "description": "包内相对路径，必须位于 models/ 目录下。不允许路径穿越。"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "模型文件字节数。"
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$",
+            "description": "模型文件 sha256 十六进制小写。设备端下载后必须逐块校验。"
+          },
+          "minRuntime": {
+            "type": "string",
+            "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+            "description": "可加载该模型的最低运行时版本。低于此版本的设备不得安装该模型。"
+          }
+        }
+      }
+    },
+    "compat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["firmwareMin", "firmwareMax"],
+      "description": "固件兼容区间。区间外的设备不得安装该模型包。",
+      "properties": {
+        "firmwareMin": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "固件版本下界。"
+        },
+        "firmwareMax": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$",
+          "description": "固件版本上界。"
+        }
+      }
+    },
+    "rollbackPartition": {
+      "type": "string",
+      "enum": ["A", "B"],
+      "description": "安装失败时回滚到的分区。只能是 A 或 B —— 自由字符串下拼错不会报错，而回滚路径失效是 OTA 最严重的失败形态。"
+    },
+    "signatureAlgorithm": {
+      "type": "string",
+      "enum": ["Ed25519"],
+      "description": "验签算法。设备端只嵌入一把公钥，不需要证书链。"
+    },
+    "signatureFile": {
+      "type": "string",
+      "minLength": 1,
+      "description": "包内签名文件相对路径。验签失败即丢弃，绝不尝试安装。"
+    }
+  }
+}
