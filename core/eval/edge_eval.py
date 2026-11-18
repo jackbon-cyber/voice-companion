@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -87,6 +88,13 @@ DEFAULT_MODEL_DIR = Path("core/models/asr")
 # 取 5% 而不是更高：TTS 合成音的起音与收音有渐变，
 # 阈值太高会切掉句首辅音，让"语音段功率"低估真实值。
 SPEECH_ACTIVITY_RATIO = 0.05
+
+# 并行识别的最大线程数。
+#
+# 不设成 CPU 核数：ctranslate2 的推理本身已用多线程，
+# 外层再开太多线程会造成线程争抢，反而更慢。
+# 4 是实测下来效果与稳定性都够用的取值。
+MAX_RECOGNITION_WORKERS = 4
 
 
 @dataclass
@@ -400,22 +408,49 @@ def evaluate(eval_dir: Path) -> tuple[dict[str, ConditionResult], bool]:
     samples = load_samples(eval_dir)
     results: dict[str, ConditionResult] = {}
 
+    # TTS 合成结果按参考文本缓存。
+    #
+    # 同一句话会出现在多个噪声条件下（这正是评测集的设计 ——
+    # 衡量同一条内容在不同信噪比下的稳定性），
+    # 因此合成结果可以复用，省掉重复的 TTS 调用。
+    # 噪声本身**不能**复用：不同信噪比下的音频是不同的输入。
+    synth_cache: dict[str, bytes] = {}
+
+    # 先把全部样本的音频准备好，再统一识别。
+    # 识别是整个评测里最慢的一环（单条约 2 秒），
+    # 准备阶段与识别阶段分开，才能把识别并行化。
+    prepared: list[tuple[str, str, bytes]] = []
     for condition, reference in samples:
         if condition not in SNR_BY_CONDITION:
             print(f"未知噪声条件 '{condition}'，跳过", file=sys.stderr)
             continue
 
-        result = results.setdefault(condition, ConditionResult(condition=condition))
-        result.sample_count += 1
-
         try:
-            pcm = synthesize(reference)
+            pcm = synth_cache.get(reference)
+            if pcm is None:
+                pcm = synthesize(reference)
+                synth_cache[reference] = pcm
         except RuntimeError as error:
             print(f"音频合成失败：{error}", file=sys.stderr)
             return results, False
 
-        noisy = add_noise(pcm, SNR_BY_CONDITION[condition])
-        recognized = recognizer.transcribe(noisy).text.strip()
+        prepared.append((condition, reference, add_noise(pcm, SNR_BY_CONDITION[condition])))
+
+    # 并行识别。
+    #
+    # **为什么值得并行**：单条识别约 2 秒，42 条样本串行要一分半钟，
+    # 对"十分钟跑通"的演示是实打实的等待。ctranslate2 的推理本身是多线程的，
+    # 线程池能吃满多核。
+    #
+    # **为什么结果仍可复现**：每条样本独立识别，互不影响；
+    # 归并时按 prepared 的原始顺序处理，输出顺序与串行执行完全一致。
+    # 噪声用的是固定随机种子，因此每次加噪结果相同。
+    recognized_texts = recognize_all(recognizer, [item[2] for item in prepared])
+
+    for (condition, reference, _), recognized in zip(prepared, recognized_texts):
+        result = results.setdefault(condition, ConditionResult(condition=condition))
+        result.sample_count += 1
+        recognized = recognized.strip()
 
         # CER 与"是否完全一致"都按归一化口径计算 ——
         # 句尾多一个句号、停顿被识别成逗号都是纯格式差异，
@@ -428,6 +463,28 @@ def evaluate(eval_dir: Path) -> tuple[dict[str, ConditionResult], bool]:
             result.details.append(f"参考={reference} 识别={recognized} CER={rate:.2f}")
 
     return results, True
+
+
+def recognize_all(recognizer, audio_chunks: list[bytes]) -> list[str]:
+    """并行识别一批音频。
+
+    @param recognizer 识别器
+    @param audio_chunks PCM 音频列表
+    @return: 识别文本列表，顺序与入参一一对应
+    """
+    if not audio_chunks:
+        return []
+
+    # 单条样本时直接串行：起线程池的开销大于收益。
+    if len(audio_chunks) == 1:
+        return [recognizer.transcribe(audio_chunks[0]).text]
+
+    worker_count = min(MAX_RECOGNITION_WORKERS, len(audio_chunks))
+    with ThreadPoolExecutor(max_workers=worker_count) as pool:
+        futures = [
+            pool.submit(recognizer.transcribe, chunk) for chunk in audio_chunks
+        ]
+        return [future.result().text for future in futures]
 
 
 def render_report(results: dict[str, ConditionResult]) -> str:
