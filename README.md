@@ -130,6 +130,7 @@ voice-companion/
 | [`docs/deployment.md`](docs/deployment.md) | 部署人员 | 环境变量、端口、排查路径 |
 | [`docs/known-limitations.md`](docs/known-limitations.md) | **所有人** | 哪些支持、哪些不支持 |
 | [`docs/secondary-development.md`](docs/secondary-development.md) | 二次开发 | 换人设/换模型/接自有平台 |
+| [`docs/architecture/README.md`](docs/architecture/README.md) | 架构评审 | 端云协同技术架构方案（11 章 + 5 附录）及其构建方式 |
 
 ---
 

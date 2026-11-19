@@ -70,6 +70,13 @@ core/eval/*.err.log
 .DS_Store
 Thumbs.db
 
+# ===== 架构方案文档的打包件（可由 tools/ 重新生成，不入库）=====
+# 方案文档的 markdown 合并产物与 docx 都是**生成文件**，
+# 由 docs/architecture/parts/*.md 经 tools/build_companion_doc.py 产出。
+# 源文件入库、生成物不入库 —— 避免"生成物被当成权威版本"的误读。
+docs/architecture/*.docx
+docs/architecture/语音情感陪伴机器人.zip
+
 # ===== deploy 层：公司内网适配，私有实现，不进开源仓库 =====
 deploy/*
 !deploy/README.md
