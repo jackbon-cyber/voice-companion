@@ -4,6 +4,8 @@ import com.company.bj.voice.cloud.memory.LongTermStore;
 import com.company.bj.voice.cloud.memory.MemoryRecord;
 import com.company.bj.voice.cloud.memory.MemoryScope;
 import com.company.bj.voice.cloud.memory.ScopeResolver;
+import com.company.bj.voice.cloud.memory.ScoredMemoryRecord;
+import com.company.bj.voice.cloud.memory.ScoredMemorySearch;
 import java.util.List;
 import java.util.Optional;
 
@@ -26,7 +28,7 @@ import java.util.Optional;
  * <p>第三道防线是"纵深防御"：前两道防的是调用方犯错，第三道防的是实现出错。
  * 成本极低，收益是隔离性不依赖单一环节的正确性。
  */
-public class ScopedCompanionMemoryStore implements LongTermStore {
+public class ScopedCompanionMemoryStore implements LongTermStore, ScoredMemorySearch {
 
     /** 底层长期记忆存储。 */
     private final LongTermStore delegate;
@@ -96,6 +98,39 @@ public class ScopedCompanionMemoryStore implements LongTermStore {
     public List<MemoryRecord> list(int topK) {
         requireScope();
         return filterByScope(delegate.list(topK));
+    }
+
+    /**
+     * 按语义检索当前作用域下的记忆，并带上检索得分。
+     *
+     * <p><b>隔离由这一层强制施加</b>：与 {@link #search} 一样，
+     * 读出后再校验一次归属 —— 越权的记录即便被底层实现漏过滤，
+     * 也到不了调用方。
+     *
+     * <p>底层实现不支持带得分检索时（{@link LongTermStore} 的其它实现），
+     * 退化为无得分检索：此时调用方拿到的记录得分标记为"未知"，
+     * 相关性判据会因此自动放宽到"有命中就当作相关" ——
+     * 这比"因为拿不到得分就什么都不说"更可用，
+     * 且不会把未知伪装成已知。
+     *
+     * @param query 查询文本
+     * @param topK  返回条数上限
+     * @return 带得分的命中记录
+     * @throws IllegalStateException 当前没有活动作用域时抛出
+     */
+    @Override
+    public List<ScoredMemoryRecord> searchScored(String query, int topK) {
+        requireScope();
+        if (delegate instanceof ScoredMemorySearch scored) {
+            List<ScoredMemoryRecord> found = scored.searchScored(query, topK);
+            MemoryScope scope = scopeResolver.current();
+            return found.stream()
+                    .filter(item -> scope.equals(item.record().scope()))
+                    .toList();
+        }
+        return filterByScope(delegate.search(query, topK)).stream()
+                .map(ScoredMemoryRecord::unscored)
+                .toList();
     }
 
     /**

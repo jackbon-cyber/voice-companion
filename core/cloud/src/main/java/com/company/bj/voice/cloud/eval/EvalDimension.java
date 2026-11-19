@@ -11,6 +11,9 @@ public enum EvalDimension {
     /** 记忆召回（云端）。 */
     MEMORY_RECALL(Runner.CLOUD),
 
+    /** 记忆作答（云端）。 */
+    MEMORY_ANSWER(Runner.CLOUD),
+
     /** 端侧识别（端侧）。 */
     ASR(Runner.EDGE),
 
@@ -64,6 +67,7 @@ public enum EvalDimension {
         return switch (this) {
             case INTENT -> "intent_accuracy";
             case MEMORY_RECALL -> "memory_recall_at_k";
+            case MEMORY_ANSWER -> "memory_answer_accuracy";
             case ASR -> "asr_accuracy";
             case SAFETY -> "safety_recall";
             case EMPATHY -> "empathy_rate";
@@ -90,9 +94,12 @@ public enum EvalDimension {
      * 让人能看见"哪几条评测句与规则字面重合"，
      * 而不是把它藏起来或假装没这回事。
      *
+     * <p><b>记忆作答维度同样要求严格不相交</b>：它与记忆召回共用同一批记忆原文，
+     * 测的也是泛化能力。
+     *
      * @return 要求严格不相交返回 {@code true}
      */
     public boolean requiresCorpusDisjoint() {
-        return this == INTENT || this == MEMORY_RECALL;
+        return this == INTENT || this == MEMORY_RECALL || this == MEMORY_ANSWER;
     }
 }

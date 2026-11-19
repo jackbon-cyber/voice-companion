@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 评测集加载器。
@@ -158,11 +159,14 @@ public class EvalDatasetLoader {
     /**
      * 解析一行评测样本。
      *
-     * <p><b>支持两种格式</b>：
+     * <p><b>支持三种格式</b>：
      * <ul>
      *   <li>{@code 维度|输入|期望} —— 三段，问句与记忆原文相同；</li>
      *   <li>{@code 维度|输入|期望|记忆原文} —— 四段，问句与记忆原文不同
-     *       （记忆召回维度用它测语义召回）。</li>
+     *       （记忆召回维度用它测语义召回）；</li>
+     *   <li>{@code 维度|输入|期望|记忆原文|期望内容} —— 五段，
+     *       最后一栏<b>留空</b>表示"库里没有这条记忆，期望系统拒答"。
+     *       记忆作答维度用它区分"答不上"与"答错了"。</li>
      * </ul>
      *
      * @param dimension  评测维度
@@ -182,8 +186,22 @@ public class EvalDatasetLoader {
         if (parts.length == 4) {
             return EvalSample.withCorpus(dimension, parts[1], parts[2], parts[3]);
         }
+        if (parts.length == 5) {
+            // 第五段留空 = 期望拒答（库里没有这条记忆）。
+            // 注意第四段（记忆原文）在这种情况下也必须留空 ——
+            // 否则这条样本会自己向记忆库写入一条记录，
+            // "库里没有答案"的前提就被自己破坏了。
+            String corpus = parts[3].isBlank() ? null : parts[3];
+            String expectedContent = parts[4].isBlank() ? null : parts[4];
+            if (corpus == null && expectedContent == null) {
+                return EvalSample.expectingRefusal(dimension, parts[1], parts[2]);
+            }
+            return new EvalSample(dimension, parts[1], parts[2], corpus,
+                expectedContent, Map.of());
+        }
         throw new IOException("评测集格式错误：" + source + " 第 " + lineNumber
-            + " 行，期望 3 段（维度|输入|期望）或 4 段（维度|输入|期望|记忆原文），实际 "
+            + " 行，期望 3 段（维度|输入|期望）、4 段（维度|输入|期望|记忆原文）"
+            + "或 5 段（维度|输入|期望|记忆原文|期望内容），实际 "
             + parts.length + " 段");
     }
 

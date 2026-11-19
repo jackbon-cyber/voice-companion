@@ -30,11 +30,14 @@ import asyncio
 import json
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from core.edge.simulator import EdgeSimulator
 from core.edge.transport.downlink import TextReply
+
+from core.e2e.memory_reset import ChromaEndpoint, MemoryResetError, clear_scopes
 
 # 判定结论：全部通过。
 RESULT_PASSED = "PASSED"
@@ -44,6 +47,36 @@ RESULT_FAILED = "FAILED"
 
 # 判定结论：环境不可用（例如云端未启动）。
 RESULT_ENV_UNAVAILABLE = "ENV_UNAVAILABLE"
+
+# 端到端脚本使用的两个用户标识的**前缀**。
+#
+# **每次运行都会追加一个运行标识**（见 run_scoped_owner_keys），
+# 原因很具体：用固定标识时，上一轮残留的记忆会留在作用域里，
+# 泄漏检测的结论就会取决于"上轮恰好留下了什么" ——
+# 与被测的隔离机制无关。归零只能清掉已知的标识，
+# 而运行标识让每次跑都落在一个**全新的作用域**里，
+# 从根上不存在残留。
+USER_A_PREFIX = "e2e-user-a"
+USER_B_PREFIX = "e2e-user-b"
+
+# 离线降级场景用的主体标识前缀。
+OFFLINE_OWNER_PREFIX = "e2e-user-offline"
+
+# Chroma 服务基址。
+DEFAULT_CHROMA_BASE_URL = "http://127.0.0.1:8765"
+
+
+def run_scoped_owner_keys(run_id: str) -> tuple[str, str, str]:
+    """生成本次运行独享的三个主体标识。
+
+    @param run_id 运行标识
+    @return (用户A, 用户B, 离线用户) 三个主体标识
+    """
+    return (
+        f"{USER_A_PREFIX}-{run_id}",
+        f"{USER_B_PREFIX}-{run_id}",
+        f"{OFFLINE_OWNER_PREFIX}-{run_id}",
+    )
 
 
 @dataclass
@@ -167,13 +200,13 @@ async def _run_exchange(
     return exchanges
 
 
-async def run_isolation_checks(url: str) -> list[CheckResult]:
+async def run_isolation_checks(url: str, user_a: str, user_b: str) -> list[CheckResult]:
     """执行跨用户记忆隔离检查。
 
     **检查设计的要点**：用户 B 必须去问**只有用户 A 才知道**的事。
 
     为什么不能只让两个用户各说各的、再各自提问：
-    那种设计下，B 的召回列表里**即使混进了 A 的记忆**，只要 B 自己的那条
+   那种设计下，B 的召回列表里**即使混进了 A 的记忆**，只要 B 自己的那条
     排在前面，回复正文与引用来源看起来仍然正常 ——
     检查会通过，而泄漏其实已经发生。
     换句话说，那种检查只在"泄漏的那条恰好排第一"时才拦得住，
@@ -182,6 +215,8 @@ async def run_isolation_checks(url: str) -> list[CheckResult]:
     让 B 直接问 A 的专属事实，泄漏就会**必然**出现在 B 的回复里。
 
     @param url 云端上行地址
+    @param user_a 用户 A 的主体标识
+    @param user_b 用户 B 的主体标识
     @return 检查结果列表
     @throws E2eEnvironmentError 云端不可达时抛出
     """
@@ -195,11 +230,11 @@ async def run_isolation_checks(url: str) -> list[CheckResult]:
     try:
         # 用户 A：陈述事实 → 追问自己的事实。
         exchanges_a = await _run_exchange(
-            url, "e2e-user-a", "e2e-session-a", [user_a_fact, user_a_query]
+            url, user_a, "e2e-session-a", [user_a_fact, user_a_query]
         )
         # 用户 B：陈述**另一件**事实 → 追问自己的事实 → **转问用户 A 的事实**。
         exchanges_b = await _run_exchange(
-            url, "e2e-user-b", "e2e-session-b", [user_b_fact, user_b_query, user_a_query]
+            url, user_b, "e2e-session-b", [user_b_fact, user_b_query, user_a_query]
         )
     except E2eEnvironmentError:
         raise
@@ -233,15 +268,32 @@ async def run_isolation_checks(url: str) -> list[CheckResult]:
 
     # 检查三：**泄漏检测**。用户 B 问的是只有用户 A 说过的事，
     # 若隔离失效，A 的记忆会出现在 B 的回复里。
+    #
+    # **判定要求 B 的回复完全没有引用来源** —— 不只是"没引用 A 的那条"。
+    #
+    # 为什么不只看"有没有引用 A 的那条"：B 的作用域里只有 B 自己的那条记忆，
+    # 而 B 问的却是"我妈妈叫什么"。所以 B 正确地回答"没有记录"时，
+    # 引用来源**必然为空**。若 B 的回复里出现了任何一条引用，
+    # 那就是 B 的作用域里混进了不该有的东西 ——
+    # 哪怕那条不是 A 的"我妈妈叫李芳"，也是泄漏的证据。
+    #
+    # 反过来，只断言"不含 A 的事实文本"是**不够**的：
+    # 上轮残留的记忆（只要文字不同）就能让那一条通过，
+    # 而泄漏其实已经发生 —— 那是靠状态残留蒙混过关。
     reply_b_leak = exchanges_b[-1]
     leaked = set(reply_a.citations) & set(reply_b_leak.citations)
     results.append(
         CheckResult(
             name="用户B问及用户A的事实时不泄漏",
-            passed=not leaked and user_a_fact not in reply_b_leak.reply_text,
+            passed=(
+                not leaked
+                and user_a_fact not in reply_b_leak.reply_text
+                and not reply_b_leak.grounded
+            ),
             detail=(
                 f"回复={reply_b_leak.reply_text!r} 引用={reply_b_leak.citations}"
                 f" 泄漏={sorted(leaked)}"
+                f" 期望=B的回复无任何引用来源"
             ),
         )
     )
@@ -262,17 +314,18 @@ async def run_isolation_checks(url: str) -> list[CheckResult]:
     return results
 
 
-async def run_offline_checks(url: str) -> list[CheckResult]:
+async def run_offline_checks(url: str, owner: str) -> list[CheckResult]:
     """执行离线降级检查。
 
     @param url 云端上行地址（指向一个不可达的端口）
+    @param owner 离线场景使用的主体标识
     @return 检查结果列表
     """
     simulator = EdgeSimulator(
         session_id="e2e-offline-session",
         cloud_url=url,
         phrases=["今天有点累", "随便聊两句"],
-        owner_key="e2e-user-offline",
+        owner_key=owner,
     )
 
     exit_code = 0
@@ -345,20 +398,58 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--report", default="data/e2e-report.json", help="JSON 报告输出路径"
     )
+    parser.add_argument(
+        "--chroma-url",
+        default=DEFAULT_CHROMA_BASE_URL,
+        help="ChromaDB 基址，用于在跑之前清空本脚本的记忆作用域",
+    )
+    parser.add_argument(
+        "--skip-reset",
+        action="store_true",
+        help="跳过记忆状态归零（会残留上轮记忆，断言结论不再可靠）",
+    )
     parser.add_argument("--skip-offline", action="store_true", help="跳过离线降级检查")
     args = parser.parse_args(argv)
 
     all_results: list[CheckResult] = []
 
+    # 本次运行独享的主体标识。
+    #
+    # **为什么用运行标识而不是固定标识**：固定标识时，
+    # 上轮残留的记忆会留在作用域里，泄漏检测的结论就取决于
+    # "上轮恰好留下了什么" —— 与被测的隔离机制无关。
+    # 运行标识让每次跑都落在一个全新作用域里，从根上不存在残留。
+    run_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    user_a, user_b, offline_owner = run_scoped_owner_keys(run_id)
+
+    # 状态归零仍在断言之前执行。
+    #
+    # **为什么这是断言可信的前提**：运行标识虽然保证了本次是干净的，
+    # 但归零能把**历史遗留**的固定标识作用域也清掉 ——
+    # 那些是旧版本脚本留下的，不清掉会一直占着存储。
+    if not args.skip_reset:
+        try:
+            cleared = clear_scopes(
+                ChromaEndpoint(base_url=args.chroma_url),
+                [user_a, user_b, offline_owner, USER_A_PREFIX, USER_B_PREFIX],
+            )
+            print(
+                "记忆状态归零："
+                + "，".join(f"{owner} 删除 {count} 条" for owner, count in cleared.items())
+            )
+        except MemoryResetError as error:
+            print(f"环境不可用：记忆状态归零失败 —— {error}", file=sys.stderr)
+            return 2
+
     try:
-        all_results.extend(asyncio.run(run_isolation_checks(args.url)))
+        all_results.extend(asyncio.run(run_isolation_checks(args.url, user_a, user_b)))
     except E2eEnvironmentError as error:
         print(f"环境不可用：{error}", file=sys.stderr)
         print("请先启动云端：powershell -File core/scripts/start.ps1", file=sys.stderr)
         return 2
 
     if not args.skip_offline:
-        all_results.extend(asyncio.run(run_offline_checks(args.offline_url)))
+        all_results.extend(asyncio.run(run_offline_checks(args.offline_url, offline_owner)))
 
     report_path = Path(args.report)
     write_report(all_results, report_path)

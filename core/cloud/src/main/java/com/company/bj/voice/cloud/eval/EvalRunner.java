@@ -46,6 +46,18 @@ public class EvalRunner {
     /** 报告字段名：评测环境信息。 */
     public static final String FIELD_ENVIRONMENT = "environment";
 
+    /** 报告字段名：记忆作答维度的作答率。 */
+    public static final String FIELD_MEMORY_ANSWER_RATE = "memoryAnswerRate";
+
+    /** 报告字段名：记忆作答维度的作答率门禁判定。 */
+    public static final String FIELD_MEMORY_ANSWER_RATE_PASSED = "memoryAnswerRatePassed";
+
+    /** 报告字段名：记忆作答维度的编造率。 */
+    public static final String FIELD_MEMORY_FABRICATION_RATE = "memoryFabricationRate";
+
+    /** 报告字段名：记忆作答维度的编造率门禁判定。 */
+    public static final String FIELD_MEMORY_FABRICATION_PASSED = "memoryFabricationPassed";
+
     /** 评测集。 */
     private final EvalDataset dataset;
 
@@ -71,6 +83,34 @@ public class EvalRunner {
      * 读者据此判断实测值是否可复现。
      */
     private MemoryScope evalScope;
+
+    /**
+     * 记忆作答维度的作答率（覆盖率）。
+     *
+     * <p><b>为什么单独记一个数</b>：作答准确率只看"说了的那些对不对"，
+     * 一个"永远拒答"的系统准确率也是满分 —— 但那样的机器人毫无用处。
+     * 作答率保证"该答的时候答得出来"，与准确率一起构成完整判据。
+     */
+    private double memoryAnswerRate;
+
+    /**
+     * 作答率门禁的判定结果；未执行该维度时为空。
+     *
+     * <p><b>它与准确率是两个独立的判据</b>，两者都通过才算这一维度过关。
+     */
+    private Boolean answerRatePassed;
+
+    /**
+     * 编造率门禁的判定结果；未执行该维度时为空。
+     *
+     * <p><b>它与准确率、覆盖率都是独立的判据</b>：
+     * 准确率管"说了的对不对"，覆盖率管"该答的答不答"，
+     * 编造率管"库里没有的事会不会被说出口"。
+     */
+    private Boolean fabricationPassed;
+
+    /** 编造率实测值。 */
+    private double fabricationRate;
 
     /**
      * 构造评测运行器。
@@ -137,8 +177,24 @@ public class EvalRunner {
             scorer.prepare(dataset);
             results.add(executor.evaluate(EvalDimension.MEMORY_RECALL, scorer));
             evalScope = scorer.evalScope();
+
+            // 记忆作答维度：测"用户实际听到的那句话"对不对。
+            //
+            // **必须在记忆召回之后单独准备**：两个维度共用同一批记忆原文，
+            // 但打分口径不同 —— 召回看"有没有进前 K"，作答看"排第一的那条对不对"。
+            // 各自 prepare 会各自清空作用域，保证检索环境一致。
+            MemoryAnswerScorer answerScorer = new MemoryAnswerScorer(
+                longTermStore, scopeResolver, MEMORY_TOP_K);
+            answerScorer.prepare(dataset);
+            results.add(executor.evaluate(EvalDimension.MEMORY_ANSWER, answerScorer));
+            memoryAnswerRate = answerScorer.answerRate();
+            answerRatePassed = checkAnswerRate(answerScorer);
+            fabricationRate = answerScorer.fabricationRate();
+            fabricationPassed = checkFabrication(answerScorer);
         } else {
             results.add(EvalExecutor.DimensionResult.empty(EvalDimension.MEMORY_RECALL,
+                "未注入长期记忆存储（需要 ChromaDB），本维度未覆盖，不参与门禁判定"));
+            results.add(EvalExecutor.DimensionResult.empty(EvalDimension.MEMORY_ANSWER,
                 "未注入长期记忆存储（需要 ChromaDB），本维度未覆盖，不参与门禁判定"));
         }
 
@@ -148,7 +204,52 @@ public class EvalRunner {
         results.add(executor.evaluate(
             EvalDimension.EMPATHY, EvalScorers.empathy(emotionClassifier)));
 
-        return executor.report(results);
+        EvalExecutor.EvalReport report = executor.report(results);
+
+        // 作答率与编造率是**独立于准确率的两道门禁**。
+        //
+        // 准确率只看"说了的那些对不对"，一个"永远拒答"的系统准确率也是满分 ——
+        // 但那样的机器人毫无用处。这道门禁保证"该答的时候答得出来"。
+        //
+        // 编造率管相反的方向：库里没有的事，绝不能说出口。
+        int extraFailures = 0;
+        if (answerRatePassed != null && Boolean.FALSE.equals(answerRatePassed)) {
+            extraFailures++;
+        }
+        if (fabricationPassed != null && Boolean.FALSE.equals(fabricationPassed)) {
+            extraFailures++;
+        }
+        if (extraFailures > 0) {
+            return new EvalExecutor.EvalReport(
+                report.results(), false, report.failedDimensions() + extraFailures);
+        }
+        return report;
+    }
+
+    /**
+     * 检查作答率是否达到门禁阈值。
+     *
+     * @param scorer 记忆作答打分器
+     * @return 是否通过；样本数不足时返回 {@code null}（不参与判定）
+     */
+    private Boolean checkAnswerRate(MemoryAnswerScorer scorer) {
+        if (scorer.answerExpectedCount() < EvalGates.MIN_SAMPLE_SIZE) {
+            return null;
+        }
+        return scorer.answerRate() >= EvalGates.MIN_MEMORY_ANSWER_RATE;
+    }
+
+    /**
+     * 检查编造率是否在门禁上限以内。
+     *
+     * @param scorer 记忆作答打分器
+     * @return 是否通过；没有期望拒答的样本时返回 {@code null}（不参与判定）
+     */
+    private Boolean checkFabrication(MemoryAnswerScorer scorer) {
+        if (scorer.refusalExpectedCount() == 0) {
+            return null;
+        }
+        return scorer.fabricationRate() <= EvalGates.MAX_MEMORY_FABRICATION;
     }
 
     /**
@@ -158,6 +259,42 @@ public class EvalRunner {
      */
     public MemoryScope evalScope() {
         return evalScope;
+    }
+
+    /**
+     * 返回记忆作答维度的作答率。
+     *
+     * @return 作答率；未执行该维度时返回 0
+     */
+    public double memoryAnswerRate() {
+        return memoryAnswerRate;
+    }
+
+    /**
+     * 返回作答率门禁的判定结果。
+     *
+     * @return 是否通过；未执行该维度时返回 {@code null}
+     */
+    public Boolean answerRatePassed() {
+        return answerRatePassed;
+    }
+
+    /**
+     * 返回编造率门禁的判定结果。
+     *
+     * @return 是否通过；未执行该维度时返回 {@code null}
+     */
+    public Boolean fabricationPassed() {
+        return fabricationPassed;
+    }
+
+    /**
+     * 返回编造率实测值。
+     *
+     * @return 编造率
+     */
+    public double fabricationRate() {
+        return fabricationRate;
     }
 
     /**
@@ -236,6 +373,22 @@ public class EvalRunner {
     }
 
     /**
+     * 记忆作答维度的三个数的摘要。
+     *
+     * <p><b>为什么要单独一个类型</b>：这三个数都是<b>独立门禁</b>的判据，
+     * 它们既不是某个维度的实测值，也不是某一个维度的阈值 ——
+     * 用裸数字传递会丢掉"它有没有过"这个信息。
+     *
+     * @param rate   作答率
+     * @param passed 作答率是否通过门禁；{@code null} 表示不参与判定
+     * @param fabricationRate 编造率
+     * @param fabricationPassed 编造率是否通过门禁；{@code null} 表示不参与判定
+     */
+    public record AnswerRateSummary(
+        double rate, Boolean passed, double fabricationRate, Boolean fabricationPassed) {
+    }
+
+    /**
      * 把报告渲染为可读的 Markdown 文本。
      *
      * <p>报告是给人看的，因此<b>先给结论、再给明细</b>：
@@ -249,6 +402,21 @@ public class EvalRunner {
      */
     public static String renderMarkdown(EvalExecutor.EvalReport report, int ruleOverlapCount,
         MemoryScope evalScope, EvalEnvironment environment) {
+        return renderMarkdown(report, ruleOverlapCount, evalScope, environment, null);
+    }
+
+    /**
+     * 把报告渲染为可读的 Markdown 文本。
+     *
+     * @param report          评测报告
+     * @param ruleOverlapCount 规则型维度与词表的字面重叠条数
+     * @param evalScope       记忆召回维度使用的评测作用域；未执行该维度时为空
+     * @param environment     评测环境信息；为空时不渲染该小节
+     * @param answerSummary   记忆作答维度的作答率与门禁判定；为空时不渲染该说明
+     * @return Markdown 文本
+     */
+    public static String renderMarkdown(EvalExecutor.EvalReport report, int ruleOverlapCount,
+        MemoryScope evalScope, EvalEnvironment environment, AnswerRateSummary answerSummary) {
         StringBuilder builder = new StringBuilder();
         builder.append("# 语音陪伴机器人评测报告\n\n");
 
@@ -291,9 +459,36 @@ public class EvalRunner {
         builder.append("|---|---|---|\n");
         builder.append("| INTENT | 与原型示例句严格不相交（衡量泛化） | 0 |\n");
         builder.append("| MEMORY_RECALL | 与记忆关键词严格不相交（衡量泛化） | 0 |\n");
+        builder.append("| MEMORY_ANSWER | 与记忆关键词严格不相交（衡量泛化） | 0 |\n");
         builder.append("| SAFETY | 允许重叠：审核靠词表规则，评测样本必须触发规则 | ")
             .append(ruleOverlapCount).append(" |\n");
         builder.append("| EMPATHY | 允许重叠：情绪判定靠词表规则 | 0 |\n");
+
+        if (answerSummary != null) {
+            builder.append("\n## 记忆作答维度的三个数\n\n");
+            builder.append("- **作答准确率**（表中的 MEMORY_ANSWER）：系统**选择作答**时，说的正是期望记忆的比例。\n");
+            builder.append("  没有把握时如实说\"没有记录\"**不计入准确率的分子也不计入分母** —— ")
+                .append("答错一次就是用户被误导一次，而\"我不确定\"是可接受的。\n");
+            builder.append("- **作答率**（覆盖率）：")
+                .append(formatPercent(answerSummary.rate()))
+                .append("，门禁阈值 ")
+                .append(formatPercent(EvalGates.MIN_MEMORY_ANSWER_RATE))
+                .append("，判定 ")
+                .append(verdict(answerSummary.passed()))
+                .append("。\n");
+            builder.append("  这个数单独设一道门禁，是为了防止\"永远拒答\"也能拿满分 —— ")
+                .append("那样的机器人毫无用处。\n");
+            builder.append("- **编造率**：")
+                .append(formatPercent(answerSummary.fabricationRate()))
+                .append("，门禁上限 ")
+                .append(formatPercent(EvalGates.MAX_MEMORY_FABRICATION))
+                .append("，判定 ")
+                .append(verdict(answerSummary.fabricationPassed()))
+                .append("。\n");
+            builder.append("  口径是\"库里没有对应事实时，系统不拒答而是作答\"的比例。")
+                .append("这是本维度最不能妥协的一项：用户听到一句库里根本没有的话时，")
+                .append("无从分辨真假 —— 机器人一旦开始编，记忆这个核心卖点就废了。\n");
+        }
 
         if (evalScope != null) {
             builder.append("\n## 可复现性说明\n\n");
@@ -321,10 +516,58 @@ public class EvalRunner {
      */
     public static Map<String, Object> renderMap(EvalExecutor.EvalReport report,
         EvalEnvironment environment) {
+        return renderMap(report, environment, null);
+    }
+
+    /**
+     * 把报告渲染为可序列化的映射。
+     *
+     * @param report     评测报告
+     * @param environment 评测环境信息；为空时不写入该字段
+     * @param answerRate 记忆作答维度的作答率；为空时不写入该字段
+     * @return 报告内容
+     */
+    public static Map<String, Object> renderMap(EvalExecutor.EvalReport report,
+        EvalEnvironment environment, Double answerRate) {
+        return renderMap(report, environment, answerRate, null, null, null);
+    }
+
+    /**
+     * 把报告渲染为可序列化的映射。
+     *
+     * <p><b>为什么记忆作答维度要写三个字段</b>：
+     * 作答准确率、覆盖率、编造率是**三个独立门禁**的判据，
+     * 只写一个会让下游工具以为"准确率通过就算这一维度没问题" ——
+     * 而一个永远拒答的系统准确率也是满分。
+     *
+     * @param report           评测报告
+     * @param environment      评测环境信息；为空时不写入该字段
+     * @param answerRate       作答率；为空时不写入该字段
+     * @param answerRatePassed 作答率门禁判定；为空时不写入该字段
+     * @param fabricationRate  编造率；为空时不写入该字段
+     * @param fabricationPassed 编造率门禁判定；为空时不写入该字段
+     * @return 报告内容
+     */
+    public static Map<String, Object> renderMap(EvalExecutor.EvalReport report,
+        EvalEnvironment environment, Double answerRate, Boolean answerRatePassed,
+        Double fabricationRate, Boolean fabricationPassed) {
+
         Map<String, Object> map = new LinkedHashMap<>();
         map.put(FIELD_OVERALL_PASSED, report.overallPassed());
         map.put(FIELD_FAILED_DIMENSIONS, report.failedDimensions());
         map.put(FIELD_DIMENSIONS, report.toMap().get(FIELD_DIMENSIONS));
+        if (answerRate != null) {
+            map.put(FIELD_MEMORY_ANSWER_RATE, answerRate);
+        }
+        if (answerRatePassed != null) {
+            map.put(FIELD_MEMORY_ANSWER_RATE_PASSED, answerRatePassed);
+        }
+        if (fabricationRate != null) {
+            map.put(FIELD_MEMORY_FABRICATION_RATE, fabricationRate);
+        }
+        if (fabricationPassed != null) {
+            map.put(FIELD_MEMORY_FABRICATION_PASSED, fabricationPassed);
+        }
         if (environment != null && !environment.keys().isEmpty()) {
             Map<String, String> entries = new LinkedHashMap<>();
             for (String key : environment.keys()) {

@@ -34,6 +34,7 @@ FILE_SUFFIX = "-eval.txt"
 CLOUD_DIMENSIONS: tuple[str, ...] = (
     "intent",
     "memory_recall",
+    "memory_answer",
     "safety",
     "empathy",
 )
@@ -48,6 +49,7 @@ EDGE_DIMENSIONS: tuple[str, ...] = (
 STRICT_DISJOINT_DIMENSIONS: tuple[str, ...] = (
     "intent",
     "memory_recall",
+    "memory_answer",
 )
 
 # 参与门禁判定所需的最小样本数。与 EvalGates.MIN_SAMPLE_SIZE 保持一致。
@@ -100,10 +102,11 @@ def _parse(path: Path, entries: list[tuple[int, str]]) -> list[tuple[str, str, s
     samples: list[tuple[str, str, str]] = []
     for number, line in entries:
         parts = line.split("|")
-        if len(parts) not in (3, 4):
+        if len(parts) not in (3, 4, 5):
             raise ValueError(
-                f"{path} 第 {number} 行：期望 3 段（维度|输入|期望）"
-                f"或 4 段（维度|输入|期望|记忆原文），实际 {len(parts)} 段"
+                f"{path} 第 {number} 行：期望 3 段（维度|输入|期望）、"
+                f"4 段（维度|输入|期望|记忆原文）或 5 段（维度|输入|期望|记忆原文|期望内容），"
+                f"实际 {len(parts)} 段"
             )
         if parts[0].lower() != dimension:
             raise ValueError(

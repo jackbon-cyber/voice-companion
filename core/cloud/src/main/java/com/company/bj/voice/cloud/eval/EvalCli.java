@@ -206,8 +206,13 @@ public final class EvalCli {
         int ruleOverlapCount = wiredRunner.checkRuleBasedOverlap().overlapping().size();
         EvalEnvironment environment = collectEnvironment(options);
         String markdown = EvalRunner.renderMarkdown(report, ruleOverlapCount,
-            wiredRunner.evalScope(), environment);
-        String json = renderJson(report, environment);
+            wiredRunner.evalScope(), environment,
+            new EvalRunner.AnswerRateSummary(
+                wiredRunner.memoryAnswerRate(), wiredRunner.answerRatePassed(),
+                wiredRunner.fabricationRate(), wiredRunner.fabricationPassed()));
+        String json = renderJson(report, environment, wiredRunner.memoryAnswerRate(),
+            wiredRunner.answerRatePassed(), wiredRunner.fabricationRate(),
+            wiredRunner.fabricationPassed());
 
         try {
             writeReport(options.reportPath(), markdown);
@@ -295,13 +300,17 @@ public final class EvalCli {
      *
      * @param report      评测报告
      * @param environment 评测环境信息
+     * @param answerRate  记忆作答维度的作答率
      * @return JSON 文本
      */
-    private static String renderJson(EvalExecutor.EvalReport report, EvalEnvironment environment) {
+    private static String renderJson(EvalExecutor.EvalReport report, EvalEnvironment environment,
+        double answerRate, Boolean answerRatePassed, double fabricationRate,
+        Boolean fabricationPassed) {
         try {
             ObjectMapper mapper = new ObjectMapper();
-            return mapper.writerWithDefaultPrettyPrinter()
-                .writeValueAsString(EvalRunner.renderMap(report, environment));
+            return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(
+                EvalRunner.renderMap(report, environment, answerRate, answerRatePassed,
+                    fabricationRate, fabricationPassed));
         } catch (IOException error) {
             return "{\"error\":\"" + error.getMessage() + "\"}";
         }

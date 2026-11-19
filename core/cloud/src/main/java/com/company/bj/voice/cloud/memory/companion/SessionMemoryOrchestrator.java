@@ -3,8 +3,10 @@ package com.company.bj.voice.cloud.memory.companion;
 import com.company.bj.voice.cloud.memory.MemoryRecord;
 import com.company.bj.voice.cloud.memory.MemoryScope;
 import com.company.bj.voice.cloud.memory.ScopeResolver;
+import com.company.bj.voice.cloud.memory.ScoredMemoryRecord;
 import com.company.bj.voice.cloud.memory.SessionOwnerRegistry;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * 会话记忆编排服务。
@@ -127,6 +129,47 @@ public class SessionMemoryOrchestrator {
         return recall(sessionId, query, limit).stream()
                 .map(MemoryRecord::id)
                 .toList();
+    }
+
+    /**
+     * 按当前会话的用户召回记忆，并带上检索得分。
+     *
+     * <p>与 {@link #recall} 的差别是<b>多带一个得分</b>。
+     * 得分让调用方能区分"排在第一但其实不相关"与"排在第三但正是答案"，
+     * 从而决定「可以当事实陈述」还是「宁可说没有记录」。
+     *
+     * @param sessionId 会话标识
+     * @param query     查询文本
+     * @param limit     返回条数上限
+     * @return 带得分的命中记录，按得分降序
+     */
+    public List<ScoredMemoryRecord> recallScored(String sessionId, String query, int limit) {
+        if (query == null || query.isBlank()) {
+            return List.of();
+        }
+        MemoryScope scope = scopeResolverFor(sessionId);
+        return scopeResolver.withScopeResult(
+                scope, () -> store.searchScored(query, Math.max(1, limit)));
+    }
+
+    /**
+     * 召回一条<b>通过相关性准入</b>的记忆。
+     *
+     * <p>这是回复生成的<b>唯一入口</b>：它把"召回"与"能不能当事实陈述"
+     * 两件事合在一起，避免调用方各自实现一套准入规则 ——
+     * 一旦出现两套，"有的路径会陈述不相关记忆"就只是时间问题。
+     *
+     * @param sessionId 会话标识
+     * @param query     查询文本
+     * @param limit     候选条数上限
+     * @param policy    相关性准入策略
+     * @return 可作为事实陈述的记忆；没有时为空
+     */
+    public Optional<ScoredMemoryRecord> recallForStatement(
+        String sessionId, String query, int limit, MemoryRelevancePolicy policy) {
+
+        List<ScoredMemoryRecord> candidates = recallScored(sessionId, query, limit);
+        return policy.select(candidates);
     }
 
     /**

@@ -111,6 +111,105 @@ def test_no_undocumented_module_references():
     assert not missing, f"二次开发指南引用了不存在的文件：{missing}"
 
 
+def test_known_limitations_referenced_paths_exist():
+    """已知限制里引用的**代码路径**必须真实存在。
+
+    **为什么要有这条**：清单的价值全在于"它说的是真的"。
+    一条指向已删除文件的"验证方式"比没有验证方式更糟 ——
+    读者会以为那条限制已经被验证过了。
+
+    这条检查是有实际来历的：清单曾把"定时扫描未实现"写进正文，
+    而定时扫描其实早已落地；也曾引用一个路径写错的测试文件。
+    两者都不会让任何测试变红，只有这条检查能。
+    """
+    text = _doc_text("docs/known-limitations.md")
+    pattern = re.compile(r"`((?:core|docs|device-ref)/[A-Za-z0-9_./-]+)`")
+    referenced = {path for path in pattern.findall(text) if "." in path}
+
+    missing = sorted(path for path in referenced if not (REPO_ROOT / path).exists())
+    assert not missing, f"已知限制引用了不存在的路径：{missing}"
+
+
+def test_known_limitations_entries_all_have_verification():
+    """已知限制的**每一条**都要有验证方式。
+
+    **为什么要求逐条**：只检查"文档里出现过'验证方式'三个字"是不够的 ——
+    20 条限制里有一条漏了，读者就会默认那条没有证据。
+    按条目切分后逐条检查，漏一条就红。
+    """
+    text = _doc_text("docs/known-limitations.md")
+    # 条目形如 "### 2.3 标题"，按三级标题切分。
+    sections = re.split(r"^### ", text, flags=re.MULTILINE)[1:]
+
+    entries = [section for section in sections if re.match(r"\d+\.\d+", section)]
+    assert entries, "已知限制里没有找到任何条目"
+
+    missing = []
+    for entry in entries:
+        title = entry.splitlines()[0]
+        if "验证方式" not in entry:
+            missing.append(title)
+
+    assert not missing, f"这些已知限制条目没有写验证方式：{missing}"
+
+
+def test_known_limitations_status_matches_implementation():
+    """清单声称的"已实现"必须与代码里的实际接线一致。
+
+    **为什么这条不能靠人工看**：清单里的"未实现"三个字，
+    只要有人补了实现而忘了改文档，就会一直误导读者。
+    这里钉住几个**曾经漂移过**的具体断言。
+    """
+    text = _doc_text("docs/known-limitations.md")
+    cloud_root = (
+        REPO_ROOT
+        / "core"
+        / "cloud"
+        / "src"
+        / "main"
+        / "java"
+        / "com"
+        / "company"
+        / "bj"
+        / "voice"
+        / "cloud"
+    )
+
+    def java_exists(relative_java_path: str) -> bool:
+        """判断云端 Java 源文件是否存在。
+
+        @param relative_java_path 相对 cloud 根的路径
+        @return 存在返回 True
+        """
+        return (cloud_root / relative_java_path).is_file()
+
+    # 曾经漂移过的四条：鉴权、重路由、定时扫描、device-ref —— 都已实现。
+    for java_path in (
+        "auth/TokenAuthenticator.java",
+        "session/SessionReroutingService.java",
+        "session/SessionHeartbeatScanner.java",
+    ):
+        assert java_exists(java_path), f"{java_path} 不存在，清单的对应描述需重新核对"
+
+    assert (REPO_ROOT / "device-ref" / "ota" / "ota_update.py").is_file(), (
+        "device-ref 已有 OTA 脚本，清单的对应描述需重新核对"
+    )
+
+    # 清单不得再把已实现的能力写成"未实现"。
+    assert "上行 WebSocket 目前不校验任何凭据" not in text, (
+        "云端鉴权已实现，清单仍称未校验凭据"
+    )
+    assert "**驱动它扫描超时会话的定时器未实现**" not in text, (
+        "心跳定时扫描已实现，清单仍称定时器未实现"
+    )
+    assert "处理单元崩溃后，其上的会话**无法自动迁移**" not in text, (
+        "重路由逻辑已实现，清单仍称无法迁移"
+    )
+    assert "`device-ref/` 目前只有说明文档" not in text, (
+        "device-ref 已有固件头文件与打包工具，清单仍称只有说明文档"
+    )
+
+
 def test_deployment_manual_lists_all_environment_variables():
     """部署手册必须覆盖 application.yml 里定义的每一个环境变量。"""
     manual = _doc_text("docs/deployment.md")

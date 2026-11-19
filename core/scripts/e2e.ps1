@@ -56,6 +56,9 @@ $UplinkUrl = 'ws://127.0.0.1:8080/voice/uplink'
 # 报告输出目录。
 $ReportDir = Join-Path $ProjectRoot 'data\reports'
 
+# 最终指标报告（三份产物合成的可交付报告）。
+$FinalReportPath = Join-Path $ReportDir 'final-report.md'
+
 # Python 解释器。
 $PythonExe = 'F:\tools\python313\python.exe'
 
@@ -193,14 +196,35 @@ if ($StopOnExit) {
     & (Join-Path $PSScriptRoot 'stop.ps1')
 }
 
-Write-Host ''
-Write-Host '=== 汇总 ==='
-Write-Host "端到端报告：$e2eReport"
+    Write-Host ''
+    Write-Host '=== 汇总 ==='
+    Write-Host "端到端报告：$e2eReport"
 
-if ($e2eExit -ne $ExitPassed -or $evalExit -ne $ExitPassed) {
-    Write-Host '端到端验证未全部通过。' -ForegroundColor Red
-    exit $ExitFailed
-}
+    # 最终指标报告：三份产物（云端评测 / 端侧评测 / 端到端断言）合成一份。
+    #
+    # **为什么放在端到端脚本而不是评测脚本**：评测脚本产出云端与端侧两份，
+    # 但没有端到端断言结果 —— 而"跨用户泄漏 0 条"这种结论必须与
+    # "记忆召回 100%"放在同一份报告里，读者才能判断这两件事是否自洽。
+    # 放在一起，也避免出现"三份报告各自通过，合起来不知道行不行"的情况。
+    if ($e2eExit -ne $ExitEnvUnavailable) {
+        Write-Host ''
+        Write-Host '=== 最终指标报告 ==='
+        Push-Location $ProjectRoot
+        try {
+            & $python -m core.e2e.final_report --output $FinalReportPath
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host '最终报告不完整 —— 存在未产出报告的维度。' -ForegroundColor Red
+            }
+        } finally {
+            Pop-Location
+        }
+        Write-Host "最终报告：$FinalReportPath"
+    }
 
-Write-Host '端到端验证全部通过。' -ForegroundColor Green
-exit $ExitPassed
+    if ($e2eExit -ne $ExitPassed -or $evalExit -ne $ExitPassed) {
+        Write-Host '端到端验证未全部通过。' -ForegroundColor Red
+        exit $ExitFailed
+    }
+
+    Write-Host '端到端验证全部通过。' -ForegroundColor Green
+    exit $ExitPassed

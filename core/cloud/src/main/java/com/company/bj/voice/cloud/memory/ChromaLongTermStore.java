@@ -36,7 +36,7 @@ import java.util.UUID;
  * <p><b>归档标记必须参与过滤</b>：只按作用域过滤而不区分归档状态，
  * 会被遗忘的记录仍会出现在检索结果里 —— 软删除就失去了意义。
  */
-public class ChromaLongTermStore implements LongTermStore {
+public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
 
     /** 元数据键：租户标识。 */
     static final String METADATA_SCOPE_TENANT = "scope_tenant";
@@ -136,6 +136,48 @@ public class ChromaLongTermStore implements LongTermStore {
         ChromaQueryResult result = chroma.query(resolveCollectionId(),
             embeddings.embed(query), topK, where, INCLUDE_FIELDS);
         return toRecords(result, scope);
+    }
+
+    /**
+     * 按语义检索当前作用域下的记忆，并带上检索得分。
+     *
+     * <p>与 {@link #search} 的唯一差别是<b>多带一个得分</b>。
+     * 得分的价值在于区分"排在第一但其实不相关"与"排在第三但正是答案" ——
+     * 调用方据此决定「可以当事实陈述」还是「宁可说没有记录」。
+     *
+     * <p>得分换算复用 {@code ChromaQueryResultReader#toScore}，
+     * 与知识库检索、AgentScope 适配器用的是同一个公式 ——
+     * 同一个数据在不同入口算出不同量纲的数，是极难定位的一类问题。
+     *
+     * @param query 查询文本
+     * @param topK  返回条数上限
+     * @return 带得分的命中记录，按得分降序排列
+     * @throws IllegalStateException 当前没有活动作用域时抛出
+     */
+    @Override
+    public List<ScoredMemoryRecord> searchScored(String query, int topK) {
+        MemoryScope scope = resolver.current();
+        Map<String, Object> where = buildScopeWhere(scope, false);
+
+        ChromaQueryResult result = chroma.query(resolveCollectionId(),
+            embeddings.embed(query), topK, where, INCLUDE_FIELDS);
+
+        int hitCount = ChromaQueryResultReader.hitCount(result);
+        List<ScoredMemoryRecord> scored = new ArrayList<>(hitCount);
+        for (int index = 0; index < hitCount; index++) {
+            double score = ChromaQueryResultReader.toScore(
+                ChromaQueryResultReader.distanceAt(result, index));
+            scored.add(new ScoredMemoryRecord(
+                new MemoryRecord(
+                    ChromaQueryResultReader.idAt(result, index),
+                    ChromaQueryResultReader.documentAt(result, index),
+                    weightOf(ChromaQueryResultReader.metadataAt(result, index)),
+                    createdAtOf(ChromaQueryResultReader.metadataAt(result, index)),
+                    scope,
+                    archivedOf(ChromaQueryResultReader.metadataAt(result, index))),
+                score));
+        }
+        return scored;
     }
 
     @Override
