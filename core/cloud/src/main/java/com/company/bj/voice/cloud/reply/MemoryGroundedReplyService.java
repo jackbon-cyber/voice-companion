@@ -41,9 +41,6 @@ public class MemoryGroundedReplyService {
     /** 情感标签：中性。 */
     public static final String EMOTION_NEUTRAL = "neutral";
 
-    /** 记起时的回复模板。 */
-    private static final String RECALL_TEMPLATE = "我记得，%s";
-
     /** 记不起时的回复模板。 */
     private static final String NO_RECALL_TEMPLATE = "我这边还没有关于这件事的记录，你说得再具体一点我就能记下了。";
 
@@ -52,6 +49,9 @@ public class MemoryGroundedReplyService {
 
     /** 相关性准入策略。 */
     private final MemoryRelevancePolicy policy;
+
+    /** 措辞生成器。 */
+    private final ReplyPhrasing phrasing;
 
     /**
      * 构造回复生成服务。
@@ -72,12 +72,28 @@ public class MemoryGroundedReplyService {
      */
     public MemoryGroundedReplyService(
             SessionMemoryOrchestrator orchestrator, MemoryRelevancePolicy policy) {
+        this(orchestrator, policy, new TemplateReplyPhrasing());
+    }
 
-        if (orchestrator == null || policy == null) {
-            throw new IllegalArgumentException("编排服务与准入策略不能为 null");
+    /**
+     * 构造回复生成服务。
+     *
+     * @param orchestrator 记忆编排服务
+     * @param policy       相关性准入策略
+     * @param phrasing     措辞生成器
+     * @throws IllegalArgumentException 参数为 null 时抛出
+     */
+    public MemoryGroundedReplyService(
+            SessionMemoryOrchestrator orchestrator,
+            MemoryRelevancePolicy policy,
+            ReplyPhrasing phrasing) {
+
+        if (orchestrator == null || policy == null || phrasing == null) {
+            throw new IllegalArgumentException("编排服务、准入策略与措辞生成器不能为 null");
         }
         this.orchestrator = orchestrator;
         this.policy = policy;
+        this.phrasing = phrasing;
     }
 
     /**
@@ -100,7 +116,14 @@ public class MemoryGroundedReplyService {
         // 而陪伴场景的回复应当聚焦。全部记忆标识仍放进引用来源，
         // 便于追溯与端到端断言。
         MemoryRecord primary = selected.get().record();
-        String body = String.format(RECALL_TEMPLATE, primary.content());
+
+        // 措辞由生成器决定（模板或大模型）。**记忆内容本身不由生成器决定** ——
+        // 生成器只负责把已经选定好的这条内容说得更自然，因此不会引入编造。
+        String body = phrasing.phrase(primary.content());
+        if (body == null || body.isBlank()) {
+            // 生成器不可用时退回模板，而不是下发空回复。
+            body = new TemplateReplyPhrasing().phrase(primary.content());
+        }
 
         return new GroundedReply(
                 body,

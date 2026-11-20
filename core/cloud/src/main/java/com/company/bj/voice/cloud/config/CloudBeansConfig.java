@@ -13,14 +13,19 @@ import com.company.bj.voice.cloud.memory.ScopeResolver;
 import com.company.bj.voice.cloud.memory.SessionOwnerRegistry;
 import com.company.bj.voice.cloud.memory.companion.CompanionMemoryClassifier;
 import com.company.bj.voice.cloud.memory.companion.FingerprintCalculator;
+import com.company.bj.voice.cloud.memory.companion.MemoryRelevancePolicy;
 import com.company.bj.voice.cloud.memory.companion.MemoryUpdateService;
 import com.company.bj.voice.cloud.memory.companion.ScopedCompanionMemoryStore;
 import com.company.bj.voice.cloud.memory.companion.SessionMemoryOrchestrator;
 import com.company.bj.voice.cloud.protocol.ProtocolValidator;
 import com.company.bj.voice.cloud.reply.MemoryGroundedReplyService;
+import com.company.bj.voice.cloud.reply.OpenAiCompatibleReplyPhrasing;
+import com.company.bj.voice.cloud.reply.ReplyPhrasing;
+import com.company.bj.voice.cloud.reply.TemplateReplyPhrasing;
 import com.company.bj.voice.cloud.session.ProcessingUnitDirectory;
 import com.company.bj.voice.cloud.session.SessionRegistry;
 import com.company.bj.voice.cloud.session.SessionReroutingService;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.util.List;
@@ -250,14 +255,42 @@ public class CloudBeansConfig {
     }
 
     /**
+     * 构造措辞生成器。
+     *
+     * <p><b>为什么是"有凭据才启用"而不是"总是启用"</b>：
+     * "克隆下来就能跑"是本作品面向求职场景的第一目标。
+     * 没有凭据时用模板，行为完全确定、零延迟、零成本；
+     * 配置了凭据时自动切到大模型，表达更自然。
+     *
+     * <p>大模型的失败在 {@link OpenAiCompatibleReplyPhrasing} 内部被兜住
+     * （返回空串 → 调用方退回模板），因此这里不需要额外的降级开关 ——
+     * 少一个开关就少一种"配错了但看不出来"的状态。
+     *
+     * @param llmProperties 大模型配置
+     * @return 措辞生成器
+     */
+    @Bean
+    public ReplyPhrasing replyPhrasing(LlmProperties llmProperties) {
+        if (!llmProperties.enabled()) {
+            return new TemplateReplyPhrasing();
+        }
+        return new OpenAiCompatibleReplyPhrasing(
+                llmProperties,
+                HttpClient.newHttpClient(),
+                new com.fasterxml.jackson.databind.ObjectMapper());
+    }
+
+    /**
      * 构造记忆支撑的回复生成服务。
      *
      * @param orchestrator 记忆编排服务
+     * @param phrasing     措辞生成器
      * @return 回复生成服务
      */
     @Bean
     public MemoryGroundedReplyService memoryGroundedReplyService(
-            SessionMemoryOrchestrator orchestrator) {
-        return new MemoryGroundedReplyService(orchestrator);
+            SessionMemoryOrchestrator orchestrator, ReplyPhrasing phrasing) {
+        return new MemoryGroundedReplyService(
+                orchestrator, MemoryRelevancePolicy.standard(), phrasing);
     }
 }

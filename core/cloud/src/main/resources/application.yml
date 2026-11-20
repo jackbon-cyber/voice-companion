@@ -24,8 +24,16 @@ voice:
     data-path: ${VOICE_CHROMA_DATA_PATH:data/chroma}
   llm:
     # 大模型服务地址与凭据，一律走环境变量，仓库内不出现真实值。
+    # **两者都配置后才启用大模型**，否则云端回复走模板式记忆引用。
+    # 模板路径完全离线、行为确定，是"克隆下来就能跑"的默认形态。
     base-url: ${VOICE_LLM_BASE_URL:}
     api-key: ${VOICE_LLM_API_KEY:}
+    # 模型名称。OpenAI 兼容模式（POST {base-url}/chat/completions）。
+    model: ${VOICE_LLM_MODEL:qwen-plus}
+    # 单次请求超时秒数。超时后立刻退回模板，不让大模型拖垮整条链路。
+    timeout-seconds: ${VOICE_LLM_TIMEOUT_SECONDS:15}
+    # 单次生成的最大 token 数。陪伴回复很短，给多了只是拖慢响应。
+    max-tokens: ${VOICE_LLM_MAX_TOKENS:200}
   mqtt:
     host: ${VOICE_MQTT_HOST:127.0.0.1}
     port: ${VOICE_MQTT_PORT:1883}

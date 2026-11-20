@@ -47,8 +47,11 @@
 | `VOICE_UPLINK_TOKEN` | **生产必填** | 空 | 上行通道接入凭据 | **不启用鉴权，任何客户端都能接入上行通道** |
 | `VOICE_SESSION_HEARTBEAT_TIMEOUT_MS` | 否 | `90000` | 心跳超时阈值（毫秒） | 端侧断网后会话长时间不被回收，占住处理单元内存 |
 | `VOICE_SESSION_SCAN_INTERVAL_MS` | 否 | `30000` | 会话扫描间隔（毫秒） | 超时回收的检测延迟变大 |
-| `VOICE_LLM_BASE_URL` | 否 | 空 | 大模型服务地址 | 云端走降级路径（当前阶段本来就没接） |
+| `VOICE_LLM_BASE_URL` | 否 | 空 | 大模型服务地址（OpenAI 兼容，需含 `/chat/completions` 的基址） | 云端回复走模板路径（**默认行为，不影响可用性**） |
 | `VOICE_LLM_API_KEY` | 否 | 空 | 大模型 API Key | 同上 |
+| `VOICE_LLM_MODEL` | 否 | `qwen-plus` | 模型名称 | 用默认模型名请求 |
+| `VOICE_LLM_TIMEOUT_SECONDS` | 否 | `15` | 单次请求超时秒数 | 超时后立刻退回模板 |
+| `VOICE_LLM_MAX_TOKENS` | 否 | `200` | 单次生成的最大 token 数 | 可能截断长回复 |
 | `VOICE_MQTT_HOST` | 否 | `127.0.0.1` | MQTT Broker 地址 | 控制通道不可用 |
 | `VOICE_MQTT_PORT` | 否 | `1883` | MQTT Broker 端口 | 同上 |
 
@@ -62,6 +65,16 @@
 > **`VOICE_UPLINK_TOKEN` 未设置时上行通道不鉴权。** 这是开发期的默认形态，
 > 让"克隆下来就能跑"成立；生产部署**必须**设置，否则任何客户端都能接入上行通道。
 > 凭据通过请求头 `Authorization: Bearer <token>` 传递，也支持查询参数 `?token=`。
+
+> **大模型是可选增强，不是必需依赖。** `VOICE_LLM_BASE_URL` 与 `VOICE_LLM_API_KEY`
+> **两者都设置**才启用大模型路径；只设其一多半是配置写错了，
+> 此时直接走模板路径而不是发起注定失败的请求。
+> 大模型的失败（超时、5xx、响应不可解析）在服务内部被兜住，
+> 自动退回模板，**不会中断对话**。
+>
+> 启用后**记忆的选择仍然由相关性准入策略决定**，大模型只负责把已选定好的
+> 记忆内容改写成更自然的表达；**引用来源（`citations`）仍由代码填充**，
+> 不由模型生成 —— 这是跨用户隔离断言得以成立的前提。
 
 ---
 
