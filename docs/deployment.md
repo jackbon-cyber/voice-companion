@@ -49,7 +49,7 @@
 | `VOICE_SESSION_SCAN_INTERVAL_MS` | 否 | `30000` | 会话扫描间隔（毫秒） | 超时回收的检测延迟变大 |
 | `VOICE_LLM_BASE_URL` | 否 | 空 | 大模型服务地址（OpenAI 兼容，需含 `/chat/completions` 的基址） | 云端回复走模板路径（**默认行为，不影响可用性**） |
 | `VOICE_LLM_API_KEY` | 否 | 空 | 大模型 API Key | 同上 |
-| `VOICE_LLM_MODEL` | 否 | `qwen-plus` | 模型名称 | 用默认模型名请求 |
+| `VOICE_LLM_MODEL` | 否 | `qwen-plus` | 模型名称（已实测选型，见已知限制 2.15） | 用默认模型名请求 |
 | `VOICE_LLM_TIMEOUT_SECONDS` | 否 | `15` | 单次请求超时秒数 | 超时后立刻退回模板 |
 | `VOICE_LLM_MAX_TOKENS` | 否 | `200` | 单次生成的最大 token 数 | 可能截断长回复 |
 | `VOICE_MQTT_HOST` | 否 | `127.0.0.1` | MQTT Broker 地址 | 控制通道不可用 |
