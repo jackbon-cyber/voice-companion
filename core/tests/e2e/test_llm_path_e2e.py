@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -41,6 +43,39 @@ def _free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    """终止进程<b>及其全部子进程</b>。
+
+    **为什么必须连子进程一起杀**：Windows 上 {@code mvn spring-boot:run}
+    会 fork 出 java 子进程真正跑应用。只 terminate 掉 mvn 那个壳，
+    java 子进程会**继续活着**并继续占用端口、继续往 Chroma 写数据。
+
+    **这个 bug 的实际后果**（实测踩到过）：残留云端持续压 Chroma，
+    下一个用例的写入被拖到超时，于是"记忆写入失败，已忽略"——
+    表现为<b>用户 B 的记忆凭空消失</b>，端到端断言报"回复引用自己的记忆"失败。
+    而失败的真正原因在几公里之外的进程清理上，极难定位。
+
+    **为什么用 taskkill 而不是手工遍历**：手工遍历要处理
+    "孙进程"和"进程已退出"两类边界，而 taskkill /T 直接按进程树杀。
+
+    @param process 要终止的进程
+    """
+    if process.poll() is not None:
+        return
+    if os.name == "nt":
+        # /T 终止整棵进程树，/F 强制（不弹确认框）。
+        subprocess.run(
+            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
 
 
 def _wait_http(url: str, timeout_seconds: float = 90.0) -> bool:
@@ -143,11 +178,7 @@ def cloud_with_llm():
         assert _wait_http(f"http://127.0.0.1:{cloud_port}/api/health"), "云端未能启动"
         yield f"ws://127.0.0.1:{cloud_port}/voice/uplink", gateway
     finally:
-        cloud_process.terminate()
-        try:
-            cloud_process.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            cloud_process.kill()
+        _terminate_process_tree(cloud_process)
         gateway.stop()
 
 

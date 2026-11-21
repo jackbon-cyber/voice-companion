@@ -59,7 +59,7 @@ CLOUD_DIMENSION_LIMITS: dict[str, str] = {
     ),
     "MEMORY_ANSWER": (
         "只覆盖 13 条答得上 + 12 条答不上的问题，"
-        "相关性下限两侧只有 0.0023 的余量 —— **阈值是当前实测取值，不是普适结论**，"
+        "相关性下限两侧只有 0.0039 的余量 —— **阈值是当前实测取值，不是普适结论**，"
         "评测集扩充后必须重测。"
     ),
     "SAFETY": "只覆盖词表可触发的样本；未覆盖对抗性输入与多轮诱导。",
@@ -367,8 +367,8 @@ def build_summary_section(
     section.lines.append("- 长尾意图的云端大模型处理效果")
     section.lines.append("- 多轮对话中的情绪转折与澄清策略")
     section.lines.append("- 端到端延迟与并发承载能力")
-    section.lines.append("- 记忆检索的规模化表现 —— 相关性下限两侧只有 0.0023 余量，"
-                         "样本量 13 + 14 条，**换一批数据阈值很可能需要重调**")
+    section.lines.append("- 记忆检索的规模化表现 —— 相关性下限两侧只有 0.0039 余量，"
+                         "样本量 13 + 13 条，**换一批数据阈值很可能需要重调**")
     section.lines.append("- STM32 真机上的全部能力（见 `device-ref/README.md` 的未验证项）")
     section.lines.append("- 任何 LLM 相关的生成质量指标 —— 当前云端回复为**模板式记忆引用**，未接入大模型")
     section.lines.append("")

@@ -181,7 +181,21 @@ Write-Host ''
 Write-Host '=== 4/4 评测 ==='
 $evalExit = $ExitPassed
 if (-not $SkipEval) {
-    & (Join-Path $PSScriptRoot 'eval.ps1')
+    # **依赖服务的启动责任必须只归属一处**。
+    #
+    # **为什么**：本脚本已经起过依赖服务了。如果这里再把 $SkipServices 原样传下去，
+    # eval.ps1 会**再拉起一个嵌入服务** —— 而两个进程抢同一个 8766 端口时，
+    # 后起的那个健康检查永远失败，脚本会在等待循环里空转。
+    #
+    # **症状与根因分离**：看起来像"评测卡住不动"，实际是端口争抢，
+    # 排查方向会被误导到评测逻辑上（评测其实没问题，是它压根没开始跑）。
+    #
+    # **正确做法**：本脚本负责拉起依赖，eval.ps1 就不要再拉 —— 传 -SkipServices。
+    $evalArgs = @('-File', (Join-Path $PSScriptRoot 'eval.ps1'))
+    if ($SkipServices) {
+        $evalArgs += '-SkipServices'
+    }
+    & powershell @evalArgs
     $evalExit = $LASTEXITCODE
     if ($evalExit -ne $ExitPassed) {
         Write-Host '评测未通过。' -ForegroundColor Red

@@ -7,6 +7,7 @@ import com.company.bj.voice.cloud.chroma.ChromaQueryResult;
 import com.company.bj.voice.cloud.chroma.ChromaQueryResultReader;
 import com.company.bj.voice.cloud.config.ChromaProperties;
 import com.company.bj.voice.cloud.embed.EmbeddingService;
+import com.company.bj.voice.cloud.memory.companion.MemoryChunkSplitter;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -53,6 +54,23 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
     /** 元数据键：创建时间戳。 */
     static final String METADATA_CREATED_AT = "created_at";
 
+    /**
+     * 元数据键：父记录标识。
+     *
+     * <p>分片嵌入后，一条记忆对应多条片段记录，
+     * 它们通过这个键绑定回同一条记忆。
+     *
+     * <p><b>为什么需要它</b>：协议层的 {@code citations} 语义是"记忆"，
+     * 不是"片段"。命中片段后必须能找回它的父记忆，
+     * 否则引用来源会指向一个用户从未说过的片段。
+     *
+     * <p>整句存储（未分片）的记录**没有**这个键 —— 老数据与新数据因此可共存。
+     */
+    static final String METADATA_PARENT_ID = "parent_id";
+
+    /** 元数据键：父记录正文。分片记录冗余存一份原文，便于直接组装回复。 */
+    static final String METADATA_PARENT_CONTENT = "parent_content";
+
     /** Chroma 元数据过滤操作符：等于。 */
     private static final String OPERATOR_EQUALS = "$eq";
 
@@ -75,6 +93,7 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
     private final EmbeddingService embeddings;
     private final ChromaProperties props;
     private final ScopeResolver resolver;
+    private final MemoryChunkSplitter chunkSplitter;
 
     /**
      * 构造长期记忆存储。
@@ -86,10 +105,25 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
      */
     public ChromaLongTermStore(ChromaClient chroma, EmbeddingService embeddings,
         ChromaProperties props, ScopeResolver resolver) {
+        this(chroma, embeddings, props, resolver, new MemoryChunkSplitter());
+    }
+
+    /**
+     * 构造长期记忆存储。
+     *
+     * @param chroma        Chroma 客户端
+     * @param embeddings    嵌入服务，用于把文本转换为向量
+     * @param props         Chroma 配置，提供长期记忆集合名
+     * @param resolver      作用域解析器
+     * @param chunkSplitter 记忆分片器
+     */
+    public ChromaLongTermStore(ChromaClient chroma, EmbeddingService embeddings,
+        ChromaProperties props, ScopeResolver resolver, MemoryChunkSplitter chunkSplitter) {
         this.chroma = chroma;
         this.embeddings = embeddings;
         this.props = props;
         this.resolver = resolver;
+        this.chunkSplitter = chunkSplitter;
     }
 
     @Override
@@ -103,19 +137,70 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
         String id = UUID.randomUUID().toString();
         long createdAt = System.currentTimeMillis();
 
-        chroma.upsert(resolveCollectionId(),
-            List.of(id),
-            List.of(embeddings.embed(content)),
-            List.of(content),
-            List.of(buildMetadata(scope, weight, createdAt)));
+        // 分片写入：一条记忆拆成若干检索片段，各自嵌入、各自入库，
+        // 通过 parent_id 绑定回同一条记忆。
+        //
+        // **为什么这么做（实测依据）**：整句嵌入时，长记忆与短问句的向量相距较远，
+        // 得分落到相关性下限以下 —— 机器人对刚刚听用户说过的事回答"没有记录"。
+        // 分片后问句只需与其中最相关的一个片段相近。
+        List<String> chunks = chunkSplitter.split(content);
+        if (chunks.size() <= 1) {
+            // 单片段（短记忆或切不动）走整句存储，不额外绑父记录 ——
+            // 与历史数据保持同构，召回时无需特殊处理。
+            chroma.upsert(resolveCollectionId(),
+                List.of(id),
+                List.of(embeddings.embed(content)),
+                List.of(content),
+                List.of(buildMetadata(scope, weight, createdAt)));
+            return new MemoryRecord(id, content, weight, createdAt, scope, false);
+        }
 
+        List<String> chunkIds = new ArrayList<>(chunks.size());
+        List<double[]> chunkEmbeddings = new ArrayList<>(chunks.size());
+        List<String> chunkDocuments = new ArrayList<>(chunks.size());
+        List<Map<String, Object>> chunkMetadatas = new ArrayList<>(chunks.size());
+
+        for (String chunk : chunks) {
+            chunkIds.add(UUID.randomUUID().toString());
+            chunkEmbeddings.add(embeddings.embed(chunk));
+            chunkDocuments.add(chunk);
+            Map<String, Object> metadata = buildMetadata(scope, weight, createdAt);
+            metadata.put(METADATA_PARENT_ID, id);
+            metadata.put(METADATA_PARENT_CONTENT, content);
+            chunkMetadatas.add(metadata);
+        }
+
+        chroma.upsert(resolveCollectionId(),
+            chunkIds,
+            chunkEmbeddings,
+            chunkDocuments,
+            chunkMetadatas);
+
+        // 返回**父记录**而非某个片段：上层（引用来源、归档、归并）操作的单位是记忆。
         return new MemoryRecord(id, content, weight, createdAt, scope, false);
     }
 
     @Override
     public Optional<MemoryRecord> find(String id) {
         MemoryScope scope = resolver.current();
-        ChromaGetResult result = chroma.get(resolveCollectionId(), List.of(id));
+        String collectionId = resolveCollectionId();
+
+        // 分片写入后，父记忆 id **本身不在库里**（库里只有片段 id），
+        // 因此必须先按 parent_id 找片段。
+        List<String> fragmentIds = findFragmentIds(collectionId, scope, id);
+        if (!fragmentIds.isEmpty()) {
+            ChromaGetResult fragmentResult = chroma.get(collectionId, fragmentIds);
+            if (!fragmentResult.ids().isEmpty()) {
+                MemoryRecord record = toRecord(fragmentResult, 0);
+                if (scope.equals(record.scope()) && !record.archived()) {
+                    return Optional.of(record);
+                }
+            }
+            // 片段存在但已归档 —— 与整句路径的语义保持一致：归档记录不算"存在"。
+            return Optional.empty();
+        }
+
+        ChromaGetResult result = chroma.get(collectionId, List.of(id));
         if (result.ids().isEmpty()) {
             return Optional.empty();
         }
@@ -135,7 +220,117 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
 
         ChromaQueryResult result = chroma.query(resolveCollectionId(),
             embeddings.embed(query), topK, where, INCLUDE_FIELDS);
-        return toRecords(result, scope);
+        return toParentRecords(result, scope);
+    }
+
+    /**
+     * 把检索命中还原成<b>父记忆</b>并按父记忆去重。
+     *
+     * <p><b>为什么必须还原</b>：分片写入后，一条记忆对应多条片段记录。
+     * 若直接把片段当作记忆返回：
+     * <ul>
+     *   <li>引用来源会指向一个<b>用户从未说过的片段</b>
+     *       （用户说的是"我妈妈叫李芳，她很爱我…"，引用却指向"还总提醒我早点休息"）；</li>
+     *   <li>同一条记忆的多个片段会占满召回窗口，把其他记忆挤出去；</li>
+     *   <li>回复正文会变成片段的拼接，而不是一条完整记忆。</li>
+     * </ul>
+     *
+     * <p><b>去重规则</b>：同一个父记忆的多个片段，只保留<b>得分最高</b>的那一个。
+     * 保留最高分而不是求和 —— 片段得分不可比（"我妈妈叫李芳" 与
+     * "还总提醒我早点休息" 语义强度本就不同），求和会系统性偏向片段多的记忆。
+     *
+     * <p><b>未分片的旧记录</b>没有 {@code parent_id} 元数据，
+     * 直接以自身为父记忆返回 —— 新旧数据因此可以在同一个池子里竞争，无需迁移。
+     *
+     * @param result 检索结果
+     * @param scope  当前作用域
+     * @return 按父记忆去重后的记录列表
+     */
+    private List<MemoryRecord> toParentRecords(ChromaQueryResult result, MemoryScope scope) {
+        Map<String, MemoryRecord> bestByParent = new LinkedHashMap<>();
+        int hitCount = ChromaQueryResultReader.hitCount(result);
+
+        for (int index = 0; index < hitCount; index++) {
+            Map<String, Object> metadata = ChromaQueryResultReader.metadataAt(result, index);
+            String parentId = stringOf(metadata, METADATA_PARENT_ID);
+            String parentContent = stringOf(metadata, METADATA_PARENT_CONTENT);
+
+            String recordId = parentId == null || parentId.isBlank()
+                ? ChromaQueryResultReader.idAt(result, index)
+                : parentId;
+            String content = parentContent == null || parentContent.isBlank()
+                ? ChromaQueryResultReader.documentAt(result, index)
+                : parentContent;
+
+            MemoryRecord record = new MemoryRecord(
+                recordId,
+                content,
+                weightOf(metadata),
+                createdAtOf(metadata),
+                scope,
+                archivedOf(metadata));
+
+            // 同一父记忆只保留先出现的那条 —— 检索结果已按得分降序，
+            // 因此"先出现"的就是得分最高的那一片。
+            bestByParent.putIfAbsent(recordId, record);
+        }
+        return new ArrayList<>(bestByParent.values());
+    }
+
+    /**
+     * 把检索命中还原成父记忆，并保留每个父记忆的<b>最高得分</b>。
+     *
+     * <p>与 {@link #toParentRecords} 的差别：这里保留了得分，
+     * 因为相关性准入策略要靠得分判断能不能作为事实陈述。
+     *
+     * @param result 检索结果
+     * @param scope  当前作用域
+     * @return 按父记忆去重后的带得分记录
+     */
+    private List<ScoredMemoryRecord> toParentScored(ChromaQueryResult result, MemoryScope scope) {
+        Map<String, ScoredMemoryRecord> bestByParent = new LinkedHashMap<>();
+        int hitCount = ChromaQueryResultReader.hitCount(result);
+
+        for (int index = 0; index < hitCount; index++) {
+            Map<String, Object> metadata = ChromaQueryResultReader.metadataAt(result, index);
+            String parentId = stringOf(metadata, METADATA_PARENT_ID);
+            String parentContent = stringOf(metadata, METADATA_PARENT_CONTENT);
+
+            String recordId = parentId == null || parentId.isBlank()
+                ? ChromaQueryResultReader.idAt(result, index)
+                : parentId;
+            String content = parentContent == null || parentContent.isBlank()
+                ? ChromaQueryResultReader.documentAt(result, index)
+                : parentContent;
+
+            double score = ChromaQueryResultReader.toScore(
+                ChromaQueryResultReader.distanceAt(result, index));
+            ScoredMemoryRecord scored = new ScoredMemoryRecord(
+                new MemoryRecord(
+                    recordId,
+                    content,
+                    weightOf(metadata),
+                    createdAtOf(metadata),
+                    scope,
+                    archivedOf(metadata)),
+                score);
+
+            // 结果已按得分降序，先到先得即为最高分。
+            bestByParent.putIfAbsent(recordId, scored);
+        }
+        return new ArrayList<>(bestByParent.values());
+    }
+
+    /**
+     * 从元数据中取字符串值。
+     *
+     * @param metadata 元数据
+     * @param key      键
+     * @return 字符串值；不存在或类型不符时返回 {@code null}
+     */
+    private String stringOf(Map<String, Object> metadata, String key) {
+        Object value = metadata == null ? null : metadata.get(key);
+        return value instanceof String text ? text : null;
     }
 
     /**
@@ -162,22 +357,7 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
         ChromaQueryResult result = chroma.query(resolveCollectionId(),
             embeddings.embed(query), topK, where, INCLUDE_FIELDS);
 
-        int hitCount = ChromaQueryResultReader.hitCount(result);
-        List<ScoredMemoryRecord> scored = new ArrayList<>(hitCount);
-        for (int index = 0; index < hitCount; index++) {
-            double score = ChromaQueryResultReader.toScore(
-                ChromaQueryResultReader.distanceAt(result, index));
-            scored.add(new ScoredMemoryRecord(
-                new MemoryRecord(
-                    ChromaQueryResultReader.idAt(result, index),
-                    ChromaQueryResultReader.documentAt(result, index),
-                    weightOf(ChromaQueryResultReader.metadataAt(result, index)),
-                    createdAtOf(ChromaQueryResultReader.metadataAt(result, index)),
-                    scope,
-                    archivedOf(ChromaQueryResultReader.metadataAt(result, index))),
-                score));
-        }
-        return scored;
+        return toParentScored(result, scope);
     }
 
     @Override
@@ -196,26 +376,79 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
         }
         // 按创建时间倒序：控制台里最新的记忆排在最前面，与用户的时间直觉一致。
         records.sort((left, right) -> Long.compare(right.createdAt(), left.createdAt()));
-        return records;
+        return dedupeByParent(records);
+    }
+
+    /**
+     * 按父记忆去重，并保留每个父记忆的<b>最早写入</b>的那条。
+     *
+     * <p>分片写入后，一条记忆对应多条片段记录。
+     * 列举时若不去重，用户会在控制台看到同一条记忆的多个片段。
+     *
+     * @param records 记录列表
+     * @return 去重后的记录列表
+     */
+    private List<MemoryRecord> dedupeByParent(List<MemoryRecord> records) {
+        Map<String, MemoryRecord> byParent = new LinkedHashMap<>();
+        for (MemoryRecord record : records) {
+            byParent.putIfAbsent(record.id(), record);
+        }
+        return new ArrayList<>(byParent.values());
     }
 
     @Override
     public boolean forget(String id) {
         MemoryScope scope = resolver.current();
         String collectionId = resolveCollectionId();
-        ChromaGetResult fetched = chroma.get(collectionId, List.of(id));
-        if (fetched.ids().isEmpty()) {
-            return false;
+
+        // 分片写入后，传入的可能是**父记忆 id**，而库里存的是**片段 id**。
+        // 先按父 id 找片段，片段不存在再按自身 id 找（未分片的旧记录）。
+        List<String> fragmentIds = findFragmentIds(collectionId, scope, id);
+        if (fragmentIds.isEmpty()) {
+            ChromaGetResult fetched = chroma.get(collectionId, List.of(id));
+            if (fetched.ids().isEmpty()) {
+                return false;
+            }
+            MemoryRecord record = toRecord(fetched, 0);
+            // 只有「本作用域下且未归档」的记录才允许遗忘：
+            // 否则 forget 会把别的作用域的记录改写掉，或对已归档的记录重复改写。
+            if (!scope.equals(record.scope()) || record.archived()) {
+                return false;
+            }
+            // 软删除：只改写归档标记，绝不物理删除 —— 记录需保持可追溯、可恢复。
+            chroma.update(collectionId, id, Map.of(METADATA_ARCHIVED, Boolean.TRUE));
+            return true;
         }
-        MemoryRecord record = toRecord(fetched, 0);
-        // 只有「本作用域下且未归档」的记录才允许遗忘：
-        // 否则 forget 会把别的作用域的记录改写掉，或对已归档的记录重复改写。
-        if (!scope.equals(record.scope()) || record.archived()) {
-            return false;
+
+        // 归档**全部片段**：只归档其中一个会让其余片段继续被召回，
+        // 用户会看到"已删除的记忆"又冒出来。
+        for (String fragmentId : fragmentIds) {
+            chroma.update(collectionId, fragmentId, Map.of(METADATA_ARCHIVED, Boolean.TRUE));
         }
-        // 软删除：只改写归档标记，绝不物理删除 —— 记录需保持可追溯、可恢复。
-        chroma.update(collectionId, id, Map.of(METADATA_ARCHIVED, Boolean.TRUE));
         return true;
+    }
+
+    /**
+     * 找出属于指定父记忆的<b>全部片段 id</b>。
+     *
+     * @param collectionId 集合 id
+     * @param scope        当前作用域
+     * @param parentId     父记忆 id
+     * @return 片段 id 列表；没有片段时返回空列表
+     */
+    private List<String> findFragmentIds(
+        String collectionId, MemoryScope scope, String parentId) {
+        Map<String, Object> where = new LinkedHashMap<>(1);
+        List<Map<String, Object>> conditions = new ArrayList<>(4);
+        conditions.add(equality(METADATA_SCOPE_TENANT, scope.tenantId()));
+        conditions.add(equality(METADATA_SCOPE_OWNER, scope.ownerKey()));
+        conditions.add(equality(METADATA_PARENT_ID, parentId));
+        conditions.add(equality(METADATA_ARCHIVED, Boolean.FALSE));
+        where.put(OPERATOR_AND, conditions);
+
+        ChromaGetResult result = chroma.getByWhere(collectionId, where, 100, null,
+            INCLUDE_GET_FIELDS);
+        return result.ids();
     }
 
     @Override
@@ -223,9 +456,20 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
         MemoryScope scope = resolver.current();
         Map<String, Object> where = buildScopeWhere(scope, true);
 
-        ChromaQueryResult result = chroma.query(resolveCollectionId(),
-            embeddings.embed("archived"), topK, where, INCLUDE_FIELDS);
-        return toRecords(result, scope);
+        // 按元数据过滤而非语义检索。
+        //
+        // **为什么不用语义检索**：分片写入后，一条记忆对应多条片段，
+        // 用固定查询词（"archived"）做语义检索命中的是"哪个片段最像 archived"，
+        // 与"哪些记录被归档了"完全无关 —— 归档列表会随机漏掉记录。
+        // 元数据过滤问的是确定性的事实。
+        ChromaGetResult result = chroma.getByWhere(resolveCollectionId(), where, topK, null,
+            INCLUDE_GET_FIELDS);
+        List<MemoryRecord> records = new ArrayList<>(result.ids().size());
+        for (int i = 0; i < result.ids().size(); i++) {
+            records.add(toRecord(result, i));
+        }
+        // 去重：一条记忆的多个归档片段只显示一次。
+        return dedupeByParent(records);
     }
 
     @Override
@@ -364,9 +608,19 @@ public class ChromaLongTermStore implements LongTermStore, ScoredMemorySearch {
         Map<String, Object> metadata = index < result.metadatas().size()
             ? result.metadatas().get(index) : Map.of();
         String content = index < result.documents().size() ? result.documents().get(index) : "";
+        // 分片记录要还原成父记忆：id 用父 id，正文用父正文。
+        // 否则上层拿到的会是用户从未说过的片段。
+        String parentId = stringOf(metadata, METADATA_PARENT_ID);
+        String parentContent = stringOf(metadata, METADATA_PARENT_CONTENT);
+        String recordId = parentId == null || parentId.isBlank()
+            ? result.ids().get(index)
+            : parentId;
+        String recordContent = parentContent == null || parentContent.isBlank()
+            ? content
+            : parentContent;
         return new MemoryRecord(
-            result.ids().get(index),
-            content == null ? "" : content,
+            recordId,
+            recordContent == null ? "" : recordContent,
             weightOf(metadata),
             createdAtOf(metadata),
             scopeOf(metadata),

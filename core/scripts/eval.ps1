@@ -147,18 +147,32 @@ try {
         # 意图与记忆召回两个维度会标记为"未覆盖"，其余维度照常评测。
         $EmbeddingModelPath = Join-Path $ProjectRoot 'core\models\embedding\model.onnx'
         if (Test-Path $EmbeddingModelPath) {
-            $embeddingLog = Join-Path $ProjectRoot 'data\embedding.out.log'
-            $embeddingErrLog = Join-Path $ProjectRoot 'data\embedding.err.log'
-            if (-not (Test-Path (Split-Path -Parent $embeddingLog))) {
-                New-Item -ItemType Directory -Path (Split-Path -Parent $embeddingLog) -Force | Out-Null
-            }
-            Start-Process -FilePath $python `
-                -ArgumentList '-m', 'core.edge.embedding.service', '--port', '8766', `
-                '--model-dir', 'core/models/embedding' `
-                -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden `
-                -RedirectStandardOutput $embeddingLog -RedirectStandardError $embeddingErrLog | Out-Null
-            if (-not (Wait-ForHttpOk -Uri "$EmbeddingBaseUrl/v1/health" -TimeoutSeconds 90)) {
-                Write-Host '本地嵌入服务未就绪，意图与记忆召回维度将标记为未覆盖。' -ForegroundColor Yellow
+            # **已经在跑就不要再起一个**。
+            #
+            # **为什么必须先探活**：端口被占用时，新起的进程照样能"启动成功"
+            # （Windows 上带 SO_REUSEADDR 的监听会并存），但健康检查打到的
+            # 可能是另一个实例 —— 于是后起的那个永远等不到自己服务的就绪信号，
+            # 脚本在等待循环里空转。**症状是"脚本卡住"，根因是端口争抢**，
+            # 排查方向会被误导到评测逻辑上。
+            #
+            # **复用已有实例是最省事也最安全的做法**：评测本身只关心
+            # 8766 上有一个能用的嵌入服务，不关心它是哪一次启动的。
+            if (Wait-ForHttpOk -Uri "$EmbeddingBaseUrl/v1/health" -TimeoutSeconds 3) {
+                Write-Host "本地嵌入服务已在运行，复用：$EmbeddingBaseUrl"
+            } else {
+                $embeddingLog = Join-Path $ProjectRoot 'data\embedding.out.log'
+                $embeddingErrLog = Join-Path $ProjectRoot 'data\embedding.err.log'
+                if (-not (Test-Path (Split-Path -Parent $embeddingLog))) {
+                    New-Item -ItemType Directory -Path (Split-Path -Parent $embeddingLog) -Force | Out-Null
+                }
+                Start-Process -FilePath $python `
+                    -ArgumentList '-m', 'core.edge.embedding.service', '--port', '8766', `
+                    '--model-dir', 'core/models/embedding' `
+                    -WorkingDirectory $ProjectRoot -PassThru -WindowStyle Hidden `
+                    -RedirectStandardOutput $embeddingLog -RedirectStandardError $embeddingErrLog | Out-Null
+                if (-not (Wait-ForHttpOk -Uri "$EmbeddingBaseUrl/v1/health" -TimeoutSeconds 90)) {
+                    Write-Host '本地嵌入服务未就绪，意图与记忆召回维度将标记为未覆盖。' -ForegroundColor Yellow
+                }
             }
         } else {
             Write-Host '本地嵌入模型缺失，意图与记忆召回维度将标记为未覆盖。' -ForegroundColor Yellow
