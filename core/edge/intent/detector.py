@@ -26,6 +26,12 @@ UNKNOWN_INTENT = "unknown"
 MODEL_CONFIDENCE_THRESHOLD = 0.6
 
 # 识别结果可用的置信度下限。低于该值只能靠关键词匹配。
+#
+# **与固件的一致性**：固件侧 `vc_intent_task.h` 的
+# `VC_INTENT_KEYWORD_ONLY_THRESHOLD` 必须与本值一致（千分比 500）。
+# 两者不一致时，同一句话在固件上按关键词执行、在模拟端却拒识 ——
+# 开发者以为的行为与真机不一致。
+# 由 core/tests/device_ref/test_behavior_contract.py 守着。
 RECOGNITION_CONFIDENCE_THRESHOLD = 0.5
 
 # 关键词匹配的置信度。识别本身不可信时，关键词命中也不给高置信度。

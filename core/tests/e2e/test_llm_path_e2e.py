@@ -78,7 +78,23 @@ def _terminate_process_tree(process: subprocess.Popen) -> None:
             process.kill()
 
 
-def _wait_http(url: str, timeout_seconds: float = 90.0) -> bool:
+# 云端启动等待窗口（秒）。
+#
+# **为什么是 180 而不是 90**：实测 `mvn spring-boot:run` 冷启动耗时
+# **66 秒**（Tomcat started 到 Started VoiceCloudApplication），
+# 加上进程拉起约 73 秒。原来的 90 秒窗口只剩 17 秒余量 ——
+# 在并行跑全量测试、或机器负载高时**会偶发超时**，
+# 表现为"云端未能启动"，看起来像代码有问题，实际是窗口太紧。
+#
+# **为什么不是无限等待**：无限等待会让"云端根本起不来"（缺依赖、端口冲突）
+# 这种真故障也变成漫长的等待，掩盖问题本身。
+#
+# **为什么留 2.5 倍余量**：冷启动耗时受磁盘速度与当时负载影响，
+# 波动幅度实测可达 ±30%。窗口太贴实测值会在最需要它的时候失效。
+CLOUD_STARTUP_TIMEOUT_SECONDS = 180.0
+
+
+def _wait_http(url: str, timeout_seconds: float = CLOUD_STARTUP_TIMEOUT_SECONDS) -> bool:
     """等待 HTTP 服务就绪。
 
     @param url 健康检查地址
@@ -196,9 +212,14 @@ def _run_isolation(url: str, report_path: Path) -> dict:
         text=True,
         encoding="utf-8",
         errors="replace",
+        # 超时必须大于云端冷启动 + 隔离断言本身的耗时之和。
+        # 云端已在 fixture 里起好了，这里只是跑断言 ——
+        # 但断言过程要写记忆、召回、比对，机器负载高时会明显变慢。
         timeout=300,
     )
-    assert report_path.is_file(), f"端到端报告未生成：{result.stdout}\n{result.stderr}"
+    assert report_path.is_file(), (
+        f"端到端报告未生成：{result.stdout}\n{result.stderr}"
+    )
     return json.loads(report_path.read_text(encoding="utf-8"))
 
 

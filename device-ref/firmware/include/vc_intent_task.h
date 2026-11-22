@@ -26,8 +26,15 @@
 /** 置信度分母。 */
 #define VC_INTENT_CONFIDENCE_SCALE 1000
 
-/** 低于此置信度的判定降级为纯关键词匹配。 */
-#define VC_INTENT_KEYWORD_ONLY_THRESHOLD 400
+/**
+ * 低于此置信度的判定降级为纯关键词匹配。
+ *
+ * **必须与 PC 侧一致**：`core.edge.intent.detector.RECOGNITION_CONFIDENCE_THRESHOLD`
+ * 是 0.5，即千分比 500。两侧不一致时，同一句话在固件上按关键词执行、
+ * 在模拟端却拒识 —— 开发者以为的行为与真机不一致。
+ * 由 core/tests/device_ref/test_behavior_contract.py 守着。
+ */
+#define VC_INTENT_KEYWORD_ONLY_THRESHOLD 500
 
 /**
  * 意图判定结果。

@@ -86,6 +86,22 @@ class BargeInEvent:
     #: 附带说明（如延迟超限）。
     notes: list[str] = field(default_factory=list)
 
+    @property
+    def retained_text_length(self) -> int:
+        """保留文本的 UTF-8 字节长度。
+
+        **为什么要单独暴露长度**：固件侧 ``vc_barge_in_event_t`` 用
+        ``retained_text_length``（uint16）表达"保留了多少文本"。
+        PC 侧若只给内容不给长度，固件实现者只能自行猜测该填什么 ——
+        这正是行为分歧的来源（固件填 0 就等于"文本全丢了"，
+        而 PC 侧实际是保留的）。
+
+        **为什么是字节数而不是字符数**：固件侧的 ``uint16`` 存的是字节数，
+        中文字符占 3 字节。两侧口径必须一致，否则一句 20 字的中文
+        在两侧的长度分别是 20 与 60。
+        """
+        return len(self.retained_text.encode("utf-8"))
+
 
 class SessionStateMachine:
     """端侧会话状态机。"""

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -419,7 +420,18 @@ def main(argv: list[str] | None = None) -> int:
     # 上轮残留的记忆会留在作用域里，泄漏检测的结论就取决于
     # "上轮恰好留下了什么" —— 与被测的隔离机制无关。
     # 运行标识让每次跑都落在一个全新作用域里，从根上不存在残留。
-    run_id = datetime.now().strftime("%Y%m%d%H%M%S")
+    #
+    # **为什么不能只到秒**：秒级标识在**同一秒内发起两次运行**时会撞车
+    # （例如并行跑测试、或连续快速复跑）。撞车意味着两次运行共用同一个
+    # 作用域 —— 先跑的那次的记忆会被后跑的当成"别人的记忆"，
+    # 于是隔离断言报"用户 B 看到了用户 A 的记忆"。
+    # 这类失败看起来像隔离机制坏了，实际是运行标识不唯一。
+    #
+    # 加上微秒与进程号后，同一进程内的两次运行也不会撞。
+    run_id = (
+        f"{datetime.now().strftime('%Y%m%d%H%M%S%f')}"
+        f"-{os.getpid()}"
+    )
     user_a, user_b, offline_owner = run_scoped_owner_keys(run_id)
 
     # 状态归零仍在断言之前执行。

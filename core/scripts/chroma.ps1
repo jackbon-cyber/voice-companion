@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     管理本地 ChromaDB 服务（start / stop / status）。
 
@@ -347,8 +347,21 @@ function Start-ChromaService {
         throw "Chroma 启动失败，无法创建进程（Win32_Process.Create 返回 $($createResult.ReturnValue)）。详见 $stderrLog"
     }
 
-    # 等待端口就绪，最多 60 秒；服务起来后才算启动成功。
-    $deadline = (Get-Date).AddSeconds(60)
+    # 等待端口就绪；服务起来后才算启动成功。
+    #
+    # **为什么窗口是 180 秒而不是 60 秒**：等待循环里每一次
+    # Get-PortOwnerProcess 都要做一次 CIM 进程查询，
+    # 而**带 Filter 的 CIM 查询实测要 3.1 秒**（不带 Filter 的全量查询只要 0.19 秒）。
+    # 一轮循环（取属主 + 校验归属）因此要 6 秒左右，
+    # 60 秒窗口里实际只有约 10 次探测机会。
+    #
+    # 而 Chroma 冷启动（要恢复已有集合数据）实测需要 70 秒以上 ——
+    # 于是脚本在服务**实际已经起来**的情况下报"启动超时"，
+    # 把整条 start.ps1 链路带崩。
+    #
+    # **为什么不是无限等待**：端口被非 Chroma 进程占用是真故障，
+    # 应该快速失败而不是慢慢等。
+    $deadline = (Get-Date).AddSeconds(180)
     while ((Get-Date) -lt $deadline) {
         $ownerProcess = Get-PortOwnerProcess -ListenPort $ListenPort
         if ($null -ne $ownerProcess) {
@@ -367,7 +380,7 @@ function Start-ChromaService {
         Start-Sleep -Milliseconds 500
     }
 
-    throw "Chroma 启动超时（60s），端口 $ListenPort 未就绪。详见 $stderrLog"
+    throw "Chroma 启动超时（180s），端口 $ListenPort 未就绪。详见 $stderrLog"
 }
 
 function Stop-ChromaService {

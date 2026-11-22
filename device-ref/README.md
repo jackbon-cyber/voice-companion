@@ -95,6 +95,44 @@ F:\tools\python313\python.exe device-ref/ota/ota_update.py --self-check
 
 `--dry-run` **不打开设备、不写串口、不下发任何命令**，只演练流程编排与参数判定。
 
+## 行为契约：什么能在 PC 上验，什么必须等真机
+
+固件（`device-ref/firmware/include/*.h`）与 PC 模拟端（`core/edge/`）
+是同一套端侧行为的两份实现。**结构一致不等于行为一致** ——
+固件头文件里写着的语义承诺，和 PC 侧实际跑出来的行为可能对不上，
+而这类分歧**编译通过、联调通过、直到真机跑起来才暴露**。
+
+因此把行为契约写成机器可检查的形式：
+
+| 文件 | 作用 |
+|---|---|
+| `core/edge/device_ref/behavior_contract.py` | 契约清单：每条声明"固件侧语义"与"PC 侧参考实现"，并写明"不做会怎样" |
+| `core/tests/device_ref/test_behavior_contract.py` | 逐条核对：数值常量取值一致、枚举集合相同、行为规则**实际执行验证** |
+| `core/tests/device_ref/test_firmware_interfaces.py` | 原有结构契约（字段名、状态集合、协议常量） |
+
+**行为规则要真的跑一遍**，不能只比对符号名。
+例如"打断丢音频、留文本" —— 两边都有 `on_recognized` 函数，
+但 PC 侧若只记长度不记内容，打断时文本就没了。**只有真的打断一次才知道**。
+
+### 已在契约核对中查出并修复的分歧
+
+| 分歧 | 固件侧 | PC 侧 | 后果 |
+|---|---|---|---|
+| 意图降级阈值 | `VC_INTENT_KEYWORD_ONLY_THRESHOLD 400`（0.4） | `RECOGNITION_CONFIDENCE_THRESHOLD 0.5` | 同一句话在固件上按关键词执行、在模拟端却拒识 |
+| 打断事件缺文本长度 | `retained_text_length`（uint16） | 只有 `retained_text`，无长度 | 固件实现者只能猜该填什么；填 0 等于"文本全丢了" |
+
+后者的修法是给 PC 侧 `BargeInEvent` 补 `retained_text_length` 属性
+（UTF-8 字节数，与固件 `uint16` 口径一致）。
+
+### 必须在真机上测的项
+
+以下**不能**在 PC 侧断言，列在 `HARDWARE_ONLY_MEASUREMENTS` 里并写明验证方式：
+打断响应延迟绝对值、端侧 ASR 在 Cortex-M 上的延迟、任务栈与队列深度、
+I2S/DMA 中断抖动与时钟漂移、flash 余量、功耗与温升、OTA 真实切换与回滚。
+
+**这份清单的价值在"排除"**：把"PC 上验不了的"明确列出来，
+避免有人在 PC 上给它们编一个假的通过结论。
+
 ## 未验证项
 
 > 以下内容在参考实现中**未经过真机验证**，不得当作已验证能力对外承诺。
