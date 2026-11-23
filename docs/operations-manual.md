@@ -285,8 +285,57 @@ powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
 
 ```c
 #include "vc_protocol.h"
-// 用 VC_FIELD_SESSION_ID 之类，不要手写字符串字面量
+
+/* 用常量拼字段名，不要手写字符串字面量 */
+json_object *session = json_object_new_object();
+json_object_object_add(session, VC_SESSION_ID, json_object_new_string(session_id));
+json_object_object_add(session, VC_TYPE, json_object_new_string(VC_SESSION_TYPE_BEGIN));
+json_object_object_add(session, VC_OWNER_KEY, json_object_new_string(owner_key));
 ```
+
+**常量命名规则**：`VC_` + 字段名转大写下划线。
+
+| 字段名 | 常量 |
+|---|---|
+| `sessionId` | `VC_SESSION_ID` |
+| `ownerKey` | `VC_OWNER_KEY` |
+| `sequence` | `VC_SEQUENCE` |
+| `timestampMs` | `VC_TIMESTAMP_MS` |
+| `payloadBase64` | `VC_PAYLOAD_BASE64` |
+| `sampleRate` | `VC_SAMPLE_RATE` |
+| `channels` | `VC_CHANNELS` |
+| `text` | `VC_TEXT` |
+| `intent` | `VC_INTENT` |
+| `confidence` | `VC_CONFIDENCE` |
+| `handledLocally` | `VC_HANDLED_LOCALLY` |
+| `audioFormat` | `VC_AUDIO_FORMAT` |
+| `emotion` | `VC_EMOTION` |
+| `citations` | `VC_CITATIONS` |
+
+> ★ **`vc_protocol.h` 里已包含全部协议字段名常量**，包括
+> `VC_OWNER_KEY`、`VC_AUDIO_FORMAT`、`VC_SAMPLE_RATE`、`VC_CHANNELS`、
+> `VC_HANDLED_LOCALLY`、`VC_EMOTION`、`VC_CITATIONS`。
+>
+> 这张表由测试**从 schema 自动推导** —— schema 加了字段而固件没加常量，
+> 测试立刻失败。不必自己核对完整性。
+
+**音频的"取值"常量不在这里**，在 `vc_audio_task.h`：
+
+```c
+#include "vc_audio_task.h"
+
+/* 音频参数取值 */
+VC_AUDIO_SAMPLE_RATE_HZ   /* 16000 */
+VC_AUDIO_CHANNELS         /* 1 */
+VC_AUDIO_BITS_PER_SAMPLE  /* 16 */
+VC_AUDIO_FRAME_DURATION_MS /* 20 */
+VC_AUDIO_FRAME_SAMPLES    /* 320 */
+VC_AUDIO_FRAME_BYTES      /* 640 */
+```
+
+> **两套常量别搞混**：`vc_protocol.h` 是**字段名**（拼 JSON 的键），
+> `vc_audio_task.h` 是**音频参数取值**（填 JSON 的值）。
+> 两者都要用 —— 比如 `VC_SAMPLE_RATE`（键）配 `VC_AUDIO_SAMPLE_RATE_HZ`（值）。
 
 ### 1.3 设备侧的任务划分
 
@@ -591,20 +640,40 @@ powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
 | 文本回复 | `text-reply.schema.json` | ✅ 已实现 |
 | 语音片段 | `voice-chunk.schema.json` | ⚠️ 协议已定义，**云端未实现下发** |
 
-文本回复形如：
+文本回复形如（这是**云端实际下发的内容**，可直接对照）：
 
 ```json
 {
-  "sessionId": "...",
-  "intent": "query_weather",
-  "text": "我记得，你说过你妈妈叫李芳",
-  "emotion": "warm",
-  "citations": ["mem-20261123-001"]
+  "sessionId": "manual-probe-session-1",
+  "text": "我记得，我妈妈叫李芳",
+  "emotion": "tenderness",
+  "citations": ["b8085cc5-f6f1-487f-9320-eb49ef131187"]
 }
 ```
 
+| 字段 | 说明 |
+|---|---|
+| `sessionId` | 与上行一致，设备据此把回复对回会话 |
+| `text` | 回复正文 |
+| `emotion` | 情感标签，**取值是固定集合**（见下） |
+| `citations` | 引用的记忆标识数组；**没有命中记忆时为空数组** |
+
+**`emotion` 的合法取值**（`text-reply.schema.json` 的枚举，写固件时要一一对应）：
+
+```
+neutral  joy  sadness  anger  fear  surprise  tenderness  encouragement
+```
+
+> ★ **`text-reply` 没有 `intent` 字段。**
+> schema 是 `additionalProperties: false` —— 多发一个 `intent` 会被判不合规。
+> 设备若要按意图区分处理，得自己在端侧记住"这句话对应的意图"，
+> 不能指望云端在下行里回传。
+>
 > ★ **`citations` 由代码填充，不由模型生成** ——
 > 这是「不同用户的记忆互不可见」能被机器断言的前提。
+>
+> ★ **`citations` 的值是 UUID，不是 `mem-20261123-001` 这种可读编号。**
+> 设备侧不要解析它的格式，只当不透明字符串用。
 
 ### 4.5 端侧要实现的四条行为
 
@@ -624,6 +693,124 @@ powershell -ExecutionPolicy Bypass -File core\scripts\stop.ps1
 |---|---|---|
 | `UplinkError`（网络问题） | 降级到本地陪伴继续跑 | 网络断了可以本地兜底 |
 | `UplinkAuthError`（鉴权问题） | **必须让人知道"去改配置"** | 静默降级会把配置错误伪装成网络故障 |
+
+### 4.7 ★ 云端的实际行为（实测记录）
+
+这一节是**照手册的 JSON 直连云端实测出来的**，不是设计意图。
+设备实现者可以据此判断"我的实现对不对"。
+
+**环境**：单机部署，未设 `VOICE_UPLINK_TOKEN`（开发期无鉴权）。
+
+#### 实测 1：照抄手册的 JSON，一次就通
+
+发 `session(begin)` → 发 `intent-report` → 收到回复：
+
+```json
+{
+  "sessionId": "manual-probe-session-1",
+  "text": "我记得，我妈妈叫李芳",
+  "emotion": "tenderness",
+  "citations": ["b8085cc5-f6f1-487f-9320-eb49ef131187"]
+}
+```
+
+**要点**：
+
+- 记忆在**第一轮**就写入并被召回 —— 写记忆发生在生成回复**之前**
+- `citations` 里的值是 **UUID**
+- `text-reply` **没有 `intent` 字段**（schema 是 `additionalProperties: false`）
+- 兜底话术是 `"我这边还没有关于这件事的记录，你说得再具体一点我就能记下了。"`
+
+#### 实测 2：重连（保持 sessionId，序号续传）
+
+| 阶段 | 结果 |
+|---|---|
+| 第一次连接说出"我养了一只叫豆豆的猫" | 收到回复，引用 1 条 |
+| 断开后**用同一个 sessionId** 重连，序号从 1 续传 | 收到回复，引用**同一条**记忆（UUID 相同） |
+
+→ **云端认 sessionId，不认连接**。重连不会丢上下文。
+
+#### 实测 3：跨用户隔离
+
+| 用户 | 动作 | 结果 |
+|---|---|---|
+| A（ownerKey=`...-user-a`） | 说出"我妈妈叫李芳" | 引用 1 条，回复"我记得，我妈妈叫李芳" |
+| B（ownerKey=`...-user-b`） | 问"我妈妈叫什么" | **引用 0 条**，回复兜底话术，**没有泄漏李芳** |
+
+→ 隔离**真的生效**，不是靠"谁都召不回"蒙混过关。
+
+#### 实测 4：不带 ownerKey
+
+| 动作 | 结果 |
+|---|---|
+| `session(begin)` 不带 `ownerKey` | **仍能正常对话**，但记忆落进**默认作用域** |
+
+→ 隔离失效，但**功能不报错**。这就是手册强调
+"生产部署中 ownerKey 应由接入凭据推导，而非由设备自报"的原因 ——
+靠设备自觉是不可靠的，必须在接入层强制。
+
+#### 实测 5：★ 当前这句话自己会是 Top-1 命中
+
+| 设备发出 | 云端回复 |
+|---|---|
+| `"明天下午三点有个会议"` | `"我记得，明天下午三点有个会议"` |
+
+**这不是 bug，是设计**：云端把**写记忆放在生成回复之前**，
+所以用户这一轮刚说的话立刻进入记忆库，也立刻是 Top-1 命中。
+
+> ★ **设备实现者必须知道这条行为**。
+> 看到"机器人重复用户刚说的话"，别以为是自己的固件坏了 ——
+> 该修的是云端的这个行为，不是设备。
+>
+> 反过来也解释了另一件事：**问句不会被当成记忆**。
+> 问句被分类器剔除（见 `CompanionMemoryClassifier` 的 `QUESTION_MARKERS`），
+> 否则会出现"你说你想知道你妈妈叫什么"这种更糟的表现。
+
+#### 实测 6：云端日志长什么样
+
+设备联调时**同时盯云端日志**（`core/cloud/logs/backend.out.log`），
+这是判断"设备发的东西云端认不认"的直接依据。
+
+**会话注册**（收到 `session(begin)`）：
+
+```
+会话已注册：contract-session-a-1795441251377805900 → 处理单元 unit-0，用户=contract-iso-a-1795441251377799700
+```
+
+| 片段 | 含义 |
+|---|---|
+| `会话已注册：<sessionId>` | 云端认了你的 sessionId |
+| `→ 处理单元 unit-N` | 会话被分配到的处理单元 |
+| `用户=<ownerKey>` | ★ **ownerKey 已绑定到作用域** —— 这一行是最重要的 |
+
+> **`用户=` 为空或不是你期望的值，说明 ownerKey 没传或传错了** ——
+> 此时对话仍能进行，但记忆全部落进默认作用域，跨用户隔离失效。
+
+**下发回复**（每次回你一条）：
+
+```
+下发回复：会话=contract-session-a-1795441251377805900 意图=chat 本地已处理=false 引用来源=[7a4ac619-4638-4131-9db0-cef7631008c2]
+```
+
+| 片段 | 含义 |
+|---|---|
+| `引用来源=[...]` | 非空 = 命中了记忆；**空 = 走了兜底话术** |
+| `本地已处理=false` | 该意图由云端执行（端侧已处理的意图不会上行） |
+
+**关闭连接**：
+
+```
+上行通道已关闭：CloseStatus[code=1000, reason=null]
+```
+
+**鉴权警告**（开发期正常，生产必须消失）：
+
+```
+上行通道未配置凭据，任何客户端都能接入 —— 生产部署必须配置
+```
+
+> ⚠️ 生产环境看到这行，说明 `VOICE_UPLINK_TOKEN` 没设 ——
+> **任何客户端都能接入上行通道**。
 
 ---
 
@@ -657,16 +844,43 @@ powershell -ExecutionPolicy Bypass -File core\scripts\e2e.ps1
 
 | # | 操作 | 期望 | 不符合时查什么 |
 |---|---|---|---|
-| 1 | 设备连上云端 | 后端日志出现"上行通道已连接" | WebSocket 路径、鉴权头 |
+| 1 | 设备连上云端 | 后端日志出现 `会话已注册：<sessionId>` | WebSocket 路径、鉴权头 |
 | 2 | 对着麦克风说话 | 设备日志出现识别文本 | 音频链路、VAD、ASR |
 | 3 | 说完一句话 | 设备发出 `intent-report`（含 `text`） | 断句逻辑、`text` 是否带 |
-| 4 | 云端回复 | 串口/日志出现文本回复 | `ownerKey`、`text` 字段 |
-| 5 | 换一句话提到自己 | 下一轮回复引用上一轮 | 记忆写入顺序（先写后回） |
-| 6 | 问另一个用户的事 | 引用数为 0 | `ownerKey` 一致性 |
-| 7 | 拔网线 | 设备本地出话，不静默 | 降级策略 |
-| 8 | 插回网线 | 自动重连，会话上下文还在 | `sessionId` 与序号续传 |
-| 9 | 说"等等"打断 | 已识别的那句**接着说完** | 打断处理（丢音频、留文本） |
-| 10 | 连发两句话 | 序号连续，无回退 | 序号维护 |
+| 4 | 云端回复 | 串口/日志出现文本回复；后端日志有 `下发回复：` | `ownerKey`、`text` 字段 |
+| 5 | ★ 查日志里的归属 | 后端日志 `会话已注册` 行的 `用户=` **等于你的 ownerKey** | ★ ownerKey 没传 —— 隔离会失效 |
+| 6 | 换一句话提到自己 | 下一轮回复引用上一轮（后端日志 `引用来源=[...]` 非空） | 记忆写入顺序（先写后回） |
+| 7 | 问另一个用户的事 | 引用数为 0（后端日志 `引用来源=[]`） | `ownerKey` 一致性 |
+| 8 | 拔网线 | 设备本地出话，不静默 | 降级策略 |
+| 9 | 插回网线 | 自动重连，会话上下文还在 | `sessionId` 与序号续传 |
+| 10 | 说"等等"打断 | 已识别的那句**接着说完** | 打断处理（丢音频、留文本） |
+| 11 | 连发两句话 | 序号连续，无回退 | 序号维护 |
+
+> ★ 第 5 条最容易被跳过，却是**最关键**的一条。
+> `ownerKey` 没传时**对话一切正常**，只是记忆落进默认作用域 ——
+> 没有明显报错，等到发现"不同用户串记忆"时，早就上线了。
+> 所以每次联调都要**看一眼日志里的 `用户=` 是不是你期望的值**。
+
+### 5.2.1 自动化验收（可选，但推荐）
+
+```powershell
+F:\tools\python313\python.exe -m pytest core/tests/e2e/test_device_contract.py -q
+```
+
+这条测试**对着真实云端**验证手册第 4 章的行为承诺：
+
+| 测试 | 验证 |
+|---|---|
+| `test_manual_uplink_json_works_verbatim` | 照抄手册的 JSON 能通 |
+| `test_text_reply_has_no_intent_field` | 下行**不带** `intent` 字段 |
+| `test_emotion_value_is_from_the_declared_enum` | `emotion` 取值合法 |
+| `test_citations_are_opaque_ids_not_readable_numbers` | `citations` 是不透明 ID |
+| `test_reconnect_with_same_session_id_keeps_memory` | 重连保持上下文 |
+| `test_cross_user_isolation_blocks_leak` | ★ 跨用户隔离 |
+| `test_no_match_falls_back_to_no_recall_template` | 空作用域走兜底话术 |
+| `test_current_utterance_is_its_own_top_hit` | ★ 当前话自命中是设计行为 |
+
+> 云端未运行时整组跳过（不会在没起服务的机器上产生噪声）。
 
 ### 5.3 模型包与 OTA（若要上真机）
 
@@ -1013,21 +1227,48 @@ powershell -ExecutionPolicy Bypass -File core\scripts\validate-protocol.ps1
 
 ## A.2 字段名清单（固件常量对应）
 
-```
-sessionId      协议会话标识。**重连时必须保持不变**
-sequence       上行消息序号，与音频帧共用同一序号空间，连续递增
-timestampMs    会话内相对毫秒偏移
-ownerKey       会话归属的用户标识。★ 云端据此绑定记忆作用域
-intent         意图标识，未知取 "unknown"
-confidence     0~1
-handledLocally 该意图是否已在端侧执行
-text           ★ 端侧识别出的用户原话
-slots          意图参数
-reason         结束原因
-audioFormat    音频格式协商
-payloadBase64  音频负载
-isFinalPartial 半帧补齐后的尾帧标记
-```
+**上行**（设备 → 云端）：
+
+| 字段 | 固件常量 | 说明 |
+|---|---|---|
+| `sessionId` | `VC_SESSION_ID` | 协议会话标识。**重连时必须保持不变** |
+| `sequence` | `VC_SEQUENCE` | 上行消息序号，与音频帧共用同一序号空间，连续递增 |
+| `timestampMs` | `VC_TIMESTAMP_MS` | 会话内相对毫秒偏移 |
+| `ownerKey` | `VC_OWNER_KEY` | 会话归属的用户标识。★ 云端据此绑定记忆作用域 |
+| `intent` | `VC_INTENT` | 意图标识，未知取 `"unknown"` |
+| `confidence` | `VC_CONFIDENCE` | 0~1 |
+| `handledLocally` | `VC_HANDLED_LOCALLY` | 该意图是否已在端侧执行 |
+| `text` | `VC_TEXT` | ★ 端侧识别出的用户原话 |
+| `slots` | —（固件用结构体拼装） | 意图参数 |
+| `reason` | `VC_REASON` | 结束原因 |
+| `type` | `VC_TYPE` | 会话状态：`begin` / `keepalive` / `end` |
+| `audioFormat` | `VC_AUDIO_FORMAT` | 音频格式协商对象 |
+| `sampleRate` | `VC_SAMPLE_RATE` | 采样率 |
+| `channels` | `VC_CHANNELS` | 声道数 |
+| `bitDepth` | `VC_BIT_DEPTH` | 每采样点位数 |
+| `encoding` | `VC_ENCODING` | 编码方式 |
+| `frameDurationMs` | `VC_FRAME_DURATION_MS` | 帧时长 |
+| `opusBitRate` | `VC_OPUS_BIT_RATE` | Opus 码率（`encoding=OPUS` 时必填） |
+| `payloadBase64` | `VC_PAYLOAD_BASE64` | 音频负载 |
+| `isFinalPartial` | `VC_IS_FINAL_PARTIAL` | 半帧补齐后的尾帧标记 |
+| `level` | `VC_LEVEL` | 降级档位 |
+| `direction` | `VC_DIRECTION` | 控制通道方向 |
+| `payload` | `VC_PAYLOAD` | 控制通道负载 |
+| `payloadBytes` | `VC_PAYLOAD_BYTES` | 控制通道负载长度 |
+
+**下行**（云端 → 设备）：
+
+| 字段 | 固件常量 | 说明 |
+|---|---|---|
+| `sessionId` | `VC_SESSION_ID` | 与上行一致 |
+| `text` | `VC_TEXT` | 回复正文 |
+| `emotion` | `VC_EMOTION` | 情感标签，取值见固定集合 |
+| `citations` | `VC_CITATIONS` | 引用的记忆标识数组；**不透明 UUID**，不要解析格式 |
+| `isFirst` | `VC_IS_FIRST` | 语音分片首片标记 |
+| `isLast` | `VC_IS_LAST` | 语音分片末片标记 |
+
+> ★ **下行 `text-reply` 没有 `intent` 字段**（schema 是 `additionalProperties: false`）。
+> 要按意图区分处理，设备得自己在端侧记住。
 
 ## A.3 硬约束速查
 
@@ -1040,7 +1281,7 @@ isFinalPartial 半帧补齐后的尾帧标记
 | 序号 | 连续递增，重连续传 | 无法判断丢帧还是重传 |
 | `sessionId` | 重连保持不变 | 被当作新会话 |
 | `text` | 必带 | 记忆写不进去 |
-| `ownerKey` | 必带 | 跨用户隔离失效 |
+| `ownerKey` | 必带 | 跨用户隔离失效（**且不报错**） |
 | 状态机 | 六态，与 PC 侧一致 | 停在不存在的状态上 |
 
 ---

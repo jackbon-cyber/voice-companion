@@ -35,48 +35,61 @@ EXPECTED_TASK_HEADERS: dict[str, str] = {
     "会话状态机": "vc_state_machine.h",
 }
 
+def _camel_to_constant_suffix(field: str) -> str:
+    """把小驼峰字段名转成固件常量后缀。
+
+    `sessionId` → `SESSION_ID`，`ownerKey` → `OWNER_KEY`，
+    `frameDurationMs` → `FRAME_DURATION_MS`。
+
+    @param field schema 字段名（小驼峰）
+    @return 常量后缀（全大写下划线）
+    """
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", field).upper()
+
+
+def _derive_field_constants(schema_name: str) -> list[tuple[str, str]]:
+    """从 schema 推导出该消息类型的字段常量清单。
+
+    @param schema_name schema 名
+    @return (常量后缀, 字段名) 二元组列表
+    """
+    schema = load_schema(schema_name)
+    return [
+        (_camel_to_constant_suffix(field), field)
+        for field in schema["properties"]
+    ]
+
+
+# 刻意不提供固件常量的字段。键是 schema 名，值是字段名集合。
+#
+# 为什么允许例外：不是每个字段都需要固件拼装载荷 ——
+# 例如 slots 是自由键值对象，固件侧用结构体拼装更自然，硬塞一个字符串常量反而误导。
+#
+# ★ 但例外必须**显式列出并写明理由**：漏列的代价是设备实现者
+# 找不到常量而手写字面量，正好违反"别手写"的指引。
+EXCLUDED_CONSTANTS: dict[str, set[str]] = {
+    "intent-report": {"slots"},
+}
+
 # 协议消息与其字段常量名的映射。
 # 值是 (固件常量后缀, schema 字段名) 二元组 —— 固件用大写下划线，
 # schema 用小驼峰，两者靠这张表对齐。
 # 固件不解析 JSON（flash 与实时性都不允许），但常量名必须与 schema 同名，
 # 否则联调时"schema 有字段、固件没有"这类差异极难定位。
+#
+# ★ 这张表曾经是**手写**的，代价是"表里没列的字段，固件就可以没有常量"
+# 而测试照样通过 —— ownerKey 就是这样漏掉的：它是跨用户隔离的根基，
+# 设备实现者按"用常量、别手写字面量"的指引做，却找不到可用的常量。
+#
+# 现在这张表**从 schema 自动推导**，人不再有机会漏。
+# 需要新增例外（如某个字段刻意不提供常量）时，写进 EXCLUDED_CONSTANTS 并说明理由。
 PROTOCOL_FIELD_CONSTANTS: dict[str, list[tuple[str, str]]] = {
-    "audio-frame": [
-        ("SESSION_ID", "sessionId"),
-        ("SEQUENCE", "sequence"),
-        ("TIMESTAMP_MS", "timestampMs"),
-        ("PAYLOAD_BASE64", "payloadBase64"),
-    ],
-    "voice-chunk": [
-        ("SESSION_ID", "sessionId"),
-        ("SEQUENCE", "sequence"),
-        ("IS_FIRST", "isFirst"),
-        ("IS_LAST", "isLast"),
-    ],
-    "text-reply": [
-        ("SESSION_ID", "sessionId"),
-        ("TEXT", "text"),
-    ],
-    "session": [
-        ("SESSION_ID", "sessionId"),
-        ("TYPE", "type"),
-    ],
-    "intent-report": [
-        ("SESSION_ID", "sessionId"),
-        ("SEQUENCE", "sequence"),
-        ("INTENT", "intent"),
-        ("CONFIDENCE", "confidence"),
-    ],
-    "control-channel": [
-        ("SESSION_ID", "sessionId"),
-        ("DIRECTION", "direction"),
-        ("TYPE", "type"),
-    ],
-    "degrade-level": [
-        ("LEVEL", "level"),
-        ("REASON", "reason"),
-        ("TIMESTAMP_MS", "timestampMs"),
-    ],
+    schema_name: [
+        (suffix, field)
+        for suffix, field in _derive_field_constants(schema_name)
+        if field not in EXCLUDED_CONSTANTS.get(schema_name, set())
+    ]
+    for schema_name in SCHEMA_NAMES
 }
 
 

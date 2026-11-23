@@ -90,6 +90,72 @@ typedef enum {
 /** 降级原因。 */
 #define VC_REASON "reason"
 
+/**
+ * 会话归属的用户标识。
+ *
+ * ★ 云端据此绑定记忆作用域 —— 没有它，云端写的记忆全部落进同一个作用域，
+ * 跨用户隔离无从谈起。生产部署中该值应由接入凭据推导，而非由设备自报。
+ */
+#define VC_OWNER_KEY "ownerKey"
+
+/** 音频格式协商对象（session 的 audioFormat）。 */
+#define VC_AUDIO_FORMAT "audioFormat"
+
+/** 采样率字段（audio-frame / audio-negotiation）。 */
+#define VC_SAMPLE_RATE "sampleRate"
+
+/** 声道数字段。 */
+#define VC_CHANNELS "channels"
+
+/** 每采样点位数。 */
+#define VC_BIT_DEPTH "bitDepth"
+
+/** 音频编码方式字段。 */
+#define VC_ENCODING "encoding"
+
+/** 帧时长字段（毫秒）。 */
+#define VC_FRAME_DURATION_MS "frameDurationMs"
+
+/** Opus 码率字段。encoding=OPUS 时必填。 */
+#define VC_OPUS_BIT_RATE "opusBitRate"
+
+/**
+ * 该意图是否已在端侧执行。
+ *
+ * false 时由云端执行。为 true 时设备不应再上行同义意图。
+ */
+#define VC_HANDLED_LOCALLY "handledLocally"
+
+/** 意图参数字段。 */
+#define VC_SLOTS "slots"
+
+/** 情感标签字段（text-reply / voice-chunk）。 */
+#define VC_EMOTION "emotion"
+
+/**
+ * 引用来源字段（text-reply）。
+ *
+ * ★ 由代码填充，不由模型生成 —— 这是"不同用户的记忆互不可见"
+ * 能被机器断言的前提。
+ */
+#define VC_CITATIONS "citations"
+
+/** 控制通道负载字段。 */
+#define VC_PAYLOAD "payload"
+
+/** 控制通道负载长度字段。 */
+#define VC_PAYLOAD_BYTES "payloadBytes"
+
+/* ------------------------------------------------------------------ */
+/* 音频编码取值                                                        */
+/* ------------------------------------------------------------------ */
+
+/** 16bit 小端 PCM。 */
+#define VC_AUDIO_ENCODING_PCM_S16LE "PCM_S16LE"
+
+/** Opus 编码。 */
+#define VC_AUDIO_ENCODING_OPUS "OPUS"
+
 /* ------------------------------------------------------------------ */
 /* 容量与量纲                                                          */
 /* ------------------------------------------------------------------ */
