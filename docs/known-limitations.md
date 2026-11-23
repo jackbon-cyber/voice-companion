@@ -6,6 +6,16 @@
 > 逐条标注了**验证方式** —— 只有实际验证过的项才写"已验证"。
 > 声称支持而实际不支持的能力，比不声称支持更危险。
 
+**先读哪一份**：
+
+| 你要做的事 | 先看 |
+|---|---|
+| 第一次把整套东西跑起来 | `docs/operations-manual.md`（第 0 章起，10 分钟） |
+| 把真实设备接进来 | `docs/operations-manual.md` 第 3 章（分 5 步，每步有验收标准） |
+| 部署到服务器 | `docs/operations-manual.md` 第 4 章 + `docs/deployment.md` |
+| 改代码 | `docs/secondary-development.md` |
+| 拿到真人录音后怎么收尾 | `docs/real-recording-handover.md` |
+
 ---
 
 ## 一、设计上不支持

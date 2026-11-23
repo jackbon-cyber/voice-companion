@@ -113,8 +113,10 @@ voice-companion/
 └── docs/
     ├── adr/                    # 架构决策记录
     ├── interface-contract/     # 端云接口契约
+    ├── operations-manual.md    # 操作手册：上手、接真机、部署、排障
     ├── deployment.md           # 部署手册
     ├── known-limitations.md    # 已知限制
+    ├── real-recording-handover.md # 真人录音接入交接单
     └── secondary-development.md # 二次开发指南
 ```
 
@@ -124,12 +126,14 @@ voice-companion/
 
 | 文档 | 读者 | 内容 |
 |---|---|---|
+| [`docs/operations-manual.md`](docs/operations-manual.md) | **第一次上手的人** | 10 分钟跑通 → 接真实设备（分 5 步）→ 部署到服务器 → 排障手册 |
 | [`core/README.md`](core/README.md) | 使用者 | 前置依赖、启动顺序、常用命令 |
 | [`docs/interface-contract/README.md`](docs/interface-contract/README.md) | 端云两侧开发者 | 消息类型、字段语义、兼容性规则 |
 | [`docs/adr/README.md`](docs/adr/README.md) | 接手者 | 关键决策的选项/理由/代价 |
 | [`docs/deployment.md`](docs/deployment.md) | 部署人员 | 环境变量、端口、排查路径 |
 | [`docs/known-limitations.md`](docs/known-limitations.md) | **所有人** | 哪些支持、哪些不支持 |
 | [`docs/secondary-development.md`](docs/secondary-development.md) | 二次开发 | 换人设/换模型/接自有平台 |
+| [`docs/real-recording-handover.md`](docs/real-recording-handover.md) | 录真人语音的人 | 录音要求、命名规则、到位后要重跑什么 |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | 架构评审 | 端云协同技术架构方案（11 章 + 5 附录）及其构建方式 |
 
 ---
