@@ -32,6 +32,14 @@ whisper/
 *.wav
 *.pcm
 
+# ===== 真人录音（评测输入，不入库）=====
+# 录音体积大、无法 diff、无法审阅，且属于特定人员的语音数据。
+# 目录本身保留（含说明文件），音频文件不入库。
+# 录音的获取方式与命名规则见 core/eval/recordings/README.md。
+core/eval/recordings/*.wav
+core/eval/recordings/*.mp3
+core/eval/recordings/*.flac
+
 # ===== 本地密钥与配置 =====
 .env
 .env.local

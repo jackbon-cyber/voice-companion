@@ -223,6 +223,37 @@ def _run_isolation(url: str, report_path: Path) -> dict:
     return json.loads(report_path.read_text(encoding="utf-8"))
 
 
+def _format_failure(report: dict, label: str) -> str:
+    """把端到端报告的失败项整理成可读的报错。
+
+    **为什么要单独格式化**：报告里可能有十几条断言明细，
+    直接把整个 JSON 塞进报错信息，真正失败的那一条被淹没了 ——
+    排查时得先在几百字里找"passed: false"。
+    这里只列出**失败项**的名字与细节。
+
+    @param report 端到端报告
+    @param label 场景标签
+    @return: 报错信息
+    """
+    failed = [
+        check
+        for check in report.get("checks", [])
+        if not check.get("passed", True)
+    ]
+    if not failed:
+        return (
+            f"{label}未通过，但报告里没有失败项 —— "
+            f"完整报告：{json.dumps(report, ensure_ascii=False)}"
+        )
+
+    lines = [f"{label}未通过，以下 {len(failed)} 项断言失败："]
+    for check in failed:
+        lines.append(f"  - {check.get('name', '(未命名)')}：{check.get('detail', '')}")
+    lines.append("")
+    lines.append(f"完整报告：{json.dumps(report, ensure_ascii=False)}")
+    return "\n".join(lines)
+
+
 @pytest.mark.slow
 def test_llm_path_keeps_isolation(cloud_with_llm, tmp_path: Path):
     """接入大模型后，隔离断言依然全部通过。
@@ -233,9 +264,7 @@ def test_llm_path_keeps_isolation(cloud_with_llm, tmp_path: Path):
 
     report = _run_isolation(url, tmp_path / "e2e-llm.json")
 
-    assert report.get("result") == "PASSED", (
-        f"端到端未通过：{json.dumps(report, ensure_ascii=False)}"
-    )
+    assert report.get("result") == "PASSED", _format_failure(report, "接入大模型后的隔离")
 
     # 隔离相关的四项必须全过。
     isolation_checks = [
@@ -258,6 +287,4 @@ def test_llm_failure_falls_back_to_template(cloud_with_llm, tmp_path: Path):
 
     report = _run_isolation(url, tmp_path / "e2e-llm-down.json")
 
-    assert report.get("result") == "PASSED", (
-        f"降级路径未通过：{json.dumps(report, ensure_ascii=False)}"
-    )
+    assert report.get("result") == "PASSED", _format_failure(report, "降级路径")

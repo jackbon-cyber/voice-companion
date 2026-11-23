@@ -33,6 +33,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.eval.audio_source import (
+    AudioSource,
+    DEFAULT_RECORDING_DIR,
+    find_recording,
+    load_real_recording,
+)
 from core.eval.text_normalizer import is_exact_match, normalize_text
 
 # 评测集目录相对仓库根。
@@ -48,22 +54,33 @@ SNR_BY_CONDITION: dict[str, int] = {
     "noisy": 10,
 }
 
-# 参与门禁判定的噪声条件。
+# 门禁判定的条件分**两档**，取决于音频来源。
 #
-# **为什么只有安静室内条件参与判定**：端侧 ASR 的职责边界是
-# "固定指令 + 唤醒"（见 openspec design.md 的风险表：
+# **第一档（任何音频都判）**：clean —— 安静室内条件。
+# 端侧 ASR 的职责边界是"固定指令 + 唤醒"（见 openspec design.md 的风险表：
 # 若中文 WER 高于目标，则收敛端侧 ASR 用途，自由对话走云端）。
-# 陪伴机器人的部署形态是床头/桌面近场拾音，
-# 对应安静室内环境 —— 也就是 clean 条件。
+# 陪伴机器人的部署形态是床头/桌面近场拾音，对应安静室内环境。
+# 合成音在这个条件下虽然偏乐观，但**仍是有意义的下界**：
+# 连合成音都识别不了，真人语音只会更差。
 #
-# mild 与 noisy 条件**继续测、继续报**，但不参与门禁：
-# 音频由 TTS 合成，合成音缺少真人的音高变化与共振峰细节，
-# 属于 Whisper 的分布外输入。它在噪声下的表现既不代表真人语音，
-# 也不能用来判定模型能力 —— 拿它当门禁依据等于用不可信的测量定成败。
-# 这两个条件的价值是给出**趋势**（信噪比下降时准确率如何衰减）。
+# **第二档（仅真人录音才判）**：mild / noisy —— 噪声条件。
+# 合成音缺少真人的音高变化与共振峰细节，属于 Whisper 的分布外输入。
+# 它在噪声下的表现既不代表真人语音，也不能用来判定模型能力 ——
+# 拿它当门禁依据等于用不可信的测量定成败。
+# 换成真人录音后，测的就是"真人说话时环境噪声下能不能识别"，
+# **这正是部署场景里会遇到的真实问题**，因而具备判定资格。
 #
-# 真人语音的噪声鲁棒性**尚未验证**，这一限制已记入 docs/known-limitations.md。
-GATE_CONDITIONS: tuple[str, ...] = ("clean",)
+# **为什么不是"全部或全无"**：若因为没有真人录音就连 clean 也不判，
+# ASR 维度实际上就被绕过了 —— 门禁形同虚设。
+# clean 的判定资格不依赖于录音是否到位。
+GATE_CONDITIONS_ANY_AUDIO: tuple[str, ...] = ("clean",)
+
+# 仅在**全部**样本都来自真人录音时，才额外参与判定的条件。
+#
+# **为什么要求"全部"而不是"多数"**：混着真人与合成音的准确率，
+# 既不代表真人语音、也不代表合成音 —— 这个数字没有可解释性。
+# 宁可退回"只有 clean 参与判定"，也不要给出一个含糊的门禁依据。
+GATE_CONDITIONS_REAL_ONLY: tuple[str, ...] = ("mild", "noisy")
 
 # 端侧识别准确率下限。与 Java 侧 EvalGates.MIN_ASR_ACCURACY 保持一致。
 MIN_ASR_ACCURACY = 0.80
@@ -112,6 +129,13 @@ class ConditionResult:
 
     #: 各条样本的明细。
     details: list[str] = field(default_factory=list)
+
+    #: 各音频来源的样本数。
+    #:
+    #: **为什么要按来源分开统计**：把真人录音与 TTS 合成混在一个准确率里，
+    #: 那个数字既不代表真人语音、也不代表合成音 —— 没有意义。
+    #: 分开统计后，"这个条件用了哪种音频"一目了然。
+    sources: dict[AudioSource, int] = field(default_factory=dict)
 
     @property
     def accuracy(self) -> float:
@@ -199,18 +223,44 @@ def synthesize(reference: str) -> bytes:
     engine.save_to_file(reference, str(wav_path))
     engine.runAndWait()
 
-    raw, source_rate = _read_wav_as_pcm(wav_path)
+    try:
+        raw, source_rate = _read_wav_as_pcm(wav_path)
+    finally:
+        # 合成完立刻删掉临时文件。
+        #
+        # **为什么必须删**：临时文件名按进程与线程唯一，留着会堆积；
+        # 更重要的是 TTS 引擎在**写完之前**文件是残缺的，
+        # 任何并发读都会拿到半截音频。
+        wav_path.unlink(missing_ok=True)
+
     return resample(raw, source_rate, SAMPLE_RATE)
 
 
 def _temp_wav_path() -> Path:
-    """返回临时 WAV 文件路径。
+    """返回当前进程与线程独有的临时 WAV 文件路径。
+
+    **为什么必须唯一**：pyttsx3 的 ``save_to_file`` 是**写文件**，
+    不是写内存。多进程并发时，固定文件名会让后一个进程的写入
+    覆盖前一个进程还没读完的内容 —— 读到半截音频，
+    识别结果全空，表现为"准确率暴跌到接近 0"。
+
+    **实测踩到过**：一边跑 ``eval.ps1``、一边手动跑端侧评测，
+    两边都用同一个固定文件名。最终报告里 clean 准确率 28.6%、
+    CER 0.714，而单独跑是 85.7%、CER 0.014 —— 差的是音频，不是模型。
+
+    用进程号 + 线程号 + 递增计数，保证同一进程内的并发调用也不撞。
 
     :return: 临时文件路径
     """
+    import os
     import tempfile
+    import threading
 
-    return Path(tempfile.gettempdir()) / "voice_companion_asr_sample.wav"
+    counter = getattr(_temp_wav_path, "_counter", 0)
+    _temp_wav_path._counter = counter + 1
+
+    unique = f"voice_companion_asr_{os.getpid()}_{threading.get_ident()}_{counter}"
+    return Path(tempfile.gettempdir()) / f"{unique}.wav"
 
 
 def _read_wav_as_pcm(path: Path) -> tuple[bytes, int]:
@@ -389,10 +439,13 @@ def add_noise(pcm: bytes, snr_db: int) -> bytes:
     return noisy.tobytes()
 
 
-def evaluate(eval_dir: Path) -> tuple[dict[str, ConditionResult], bool]:
+def evaluate(
+    eval_dir: Path, recording_dir: Path | None = None
+) -> tuple[dict[str, ConditionResult], bool]:
     """执行端侧识别评测。
 
     :param eval_dir: 评测集目录
+    :param recording_dir: 真人录音目录；为 None 时用默认目录
     :return: (各条件结果, 环境是否可用)
     """
     from core.edge.asr.recognizer import FasterWhisperRecognizer
@@ -407,34 +460,46 @@ def evaluate(eval_dir: Path) -> tuple[dict[str, ConditionResult], bool]:
 
     samples = load_samples(eval_dir)
     results: dict[str, ConditionResult] = {}
+    recording_root = recording_dir or DEFAULT_RECORDING_DIR
 
-    # TTS 合成结果按参考文本缓存。
+    # 音频按参考文本缓存。
     #
     # 同一句话会出现在多个噪声条件下（这正是评测集的设计 ——
     # 衡量同一条内容在不同信噪比下的稳定性），
-    # 因此合成结果可以复用，省掉重复的 TTS 调用。
+    # 因此音频可以复用，省掉重复的 TTS 调用。
     # 噪声本身**不能**复用：不同信噪比下的音频是不同的输入。
-    synth_cache: dict[str, bytes] = {}
+    #
+    # **缓存键必须含来源**：真人录音与合成音是两种不同输入，
+    # 混用会让"真人语音的准确率"这个数字失去意义。
+    audio_cache: dict[tuple[str, AudioSource], bytes] = {}
 
     # 先把全部样本的音频准备好，再统一识别。
     # 识别是整个评测里最慢的一环（单条约 2 秒），
     # 准备阶段与识别阶段分开，才能把识别并行化。
-    prepared: list[tuple[str, str, bytes]] = []
+    prepared: list[tuple[str, str, bytes, AudioSource]] = []
     for condition, reference in samples:
         if condition not in SNR_BY_CONDITION:
             print(f"未知噪声条件 '{condition}'，跳过", file=sys.stderr)
             continue
 
-        try:
-            pcm = synth_cache.get(reference)
+        source = AudioSource.REAL if find_recording(reference, recording_root) else AudioSource.SYNTHETIC
+        cache_key = (reference, source)
+        pcm = audio_cache.get(cache_key)
+        if pcm is None:
+            try:
+                if source is AudioSource.REAL:
+                    pcm = load_real_recording(reference, recording_root)
+                else:
+                    pcm = synthesize(reference)
+            except (RuntimeError, ValueError) as error:
+                print(f"音频准备失败（{reference}）：{error}", file=sys.stderr)
+                return results, False
             if pcm is None:
-                pcm = synthesize(reference)
-                synth_cache[reference] = pcm
-        except RuntimeError as error:
-            print(f"音频合成失败：{error}", file=sys.stderr)
-            return results, False
+                print(f"音频准备失败（{reference}）：真人录音读取返回空", file=sys.stderr)
+                return results, False
+            audio_cache[cache_key] = pcm
 
-        prepared.append((condition, reference, add_noise(pcm, SNR_BY_CONDITION[condition])))
+        prepared.append((condition, reference, add_noise(pcm, SNR_BY_CONDITION[condition]), source))
 
     # 并行识别。
     #
@@ -447,9 +512,10 @@ def evaluate(eval_dir: Path) -> tuple[dict[str, ConditionResult], bool]:
     # 噪声用的是固定随机种子，因此每次加噪结果相同。
     recognized_texts = recognize_all(recognizer, [item[2] for item in prepared])
 
-    for (condition, reference, _), recognized in zip(prepared, recognized_texts):
+    for (condition, reference, _, source), recognized in zip(prepared, recognized_texts):
         result = results.setdefault(condition, ConditionResult(condition=condition))
         result.sample_count += 1
+        result.sources[source] = result.sources.get(source, 0) + 1
         recognized = recognized.strip()
 
         # CER 与"是否完全一致"都按归一化口径计算 ——
@@ -487,20 +553,64 @@ def recognize_all(recognizer, audio_chunks: list[bytes]) -> list[str]:
         return [future.result().text for future in futures]
 
 
+def gate_eligibility(results: dict[str, ConditionResult]) -> dict[str, str]:
+    """判定每个噪声条件是否参与门禁，并给出理由。
+
+    **这个函数是报告与退出码的唯一判定依据**。
+
+    两者必须用同一份逻辑 —— 否则会出现"报告说不参与判定、
+    退出码却按它判失败"这种自相矛盾，而且极难排查。
+
+    参与判定需要同时满足：
+    1. **样本充足**：样本量 ≥ MIN_SAMPLE_SIZE；
+    2. **音频可信**：该条件属于「任何音频都判」的第一档，
+       或属于「仅真人录音才判」的第二档且本批样本全部来自真人录音。
+
+    :param results: 各条件结果
+    :return: 条件名到判定说明的映射
+    """
+    verdicts: dict[str, str] = {}
+
+    # 该批样本是否全部来自真人录音。
+    all_real = all(
+        result.sources.get(AudioSource.REAL, 0) == result.sample_count
+        for result in results.values()
+        if result.sample_count > 0
+    )
+
+    for condition, result in results.items():
+        if result.sample_count < MIN_SAMPLE_SIZE:
+            verdicts[condition] = "样本不足，不参与判定"
+            continue
+        if condition in GATE_CONDITIONS_ANY_AUDIO:
+            verdicts[condition] = "参与判定"
+            continue
+        if condition in GATE_CONDITIONS_REAL_ONLY:
+            verdicts[condition] = (
+                "参与判定" if all_real else "音频为 TTS 合成，不作门禁依据"
+            )
+            continue
+        verdicts[condition] = "不在门禁条件表内，不参与判定"
+
+    return verdicts
+
+
 def render_report(results: dict[str, ConditionResult]) -> str:
     """渲染端侧识别评测报告。
 
     :param results: 各条件结果
     :return: Markdown 文本
     """
+    verdicts = gate_eligibility(results)
+
     lines = [
         "# 端侧识别（ASR）维度评测报告",
         "",
         "**判定依据：门禁条件下的识别准确率**。",
         "准确率对噪声极敏感，只报一个总体数字会把「模型不行」与「环境太吵」混为一谈。",
         "",
-        "| 噪声条件 | 信噪比 | 样本数 | 准确率 | 字符错误率 | 判定 |",
-        "|---|---|---|---|---|---|",
+        "| 噪声条件 | 信噪比 | 样本数 | 音频来源 | 准确率 | 字符错误率 | 判定 |",
+        "|---|---|---|---|---|---|---|",
     ]
 
     worst: ConditionResult | None = None
@@ -508,61 +618,37 @@ def render_report(results: dict[str, ConditionResult]) -> str:
         result = results.get(condition)
         if result is None:
             continue
-        # 只有**样本充足**且**属于门禁条件**的噪声条件才参与判定。
-        # 5 个样本上的 40% 与 500 个样本上的 40% 是两回事 ——
-        # 拿小样本当门禁依据，等于让随机波动决定成败。
-        participates = (
-            result.sample_count >= MIN_SAMPLE_SIZE
-            and condition in GATE_CONDITIONS
-        )
-        if participates and (worst is None or result.accuracy < worst.accuracy):
+        verdict = verdicts.get(condition, "不参与判定")
+        if verdict == "参与判定" and (
+            worst is None or result.accuracy < worst.accuracy
+        ):
             worst = result
-        if participates:
-            verdict = "参与判定"
-        elif result.sample_count < MIN_SAMPLE_SIZE:
-            verdict = "样本不足，不参与判定"
-        else:
-            verdict = "仅供参考，不作门禁依据"
         lines.append(
             f"| {condition} | {SNR_BY_CONDITION[condition]} dB | {result.sample_count} "
+            f"| {_source_summary(result)} "
             f"| {result.accuracy * 100:.1f}% | {result.character_error_rate:.3f} "
             f"| {verdict} |"
         )
 
     lines.append("")
     if worst is None:
-        lines.append("**总体结论：不参与门禁判定**（没有噪声条件的样本量达到 "
-                     f"{MIN_SAMPLE_SIZE} 条，不足以判定）。")
+        lines.append("**总体结论：不参与门禁判定**（没有噪声条件同时满足"
+                     "「样本量达标」与「音频可信」）。")
         lines.append("")
         lines.append("> 说明：音频由 TTS 合成，合成音与真人语音存在差距，")
         lines.append("> 因此本报告的准确率**偏乐观**，不应作为真机指标。")
-        failures = [detail for result in results.values() for detail in result.details]
-        if failures:
-            lines.append("")
-            lines.append("## 未识别一致的明细")
-            lines.append("")
-            for detail in failures:
-                lines.append(f"- {detail}")
-        return "\n".join(lines) + "\n"
+    else:
+        passed = worst.accuracy >= MIN_ASR_ACCURACY
+        lines.append(
+            f"**总体结论：{'通过' if passed else '不通过'}**"
+            f"（判定条件 {worst.condition}，准确率 {worst.accuracy * 100:.1f}%，"
+            f"阈值 {MIN_ASR_ACCURACY * 100:.0f}%）"
+        )
 
-    passed = worst.accuracy >= MIN_ASR_ACCURACY
-    lines.append(
-        f"**总体结论：{'通过' if passed else '不通过'}**"
-        f"（判定条件 {worst.condition}，准确率 {worst.accuracy * 100:.1f}%，"
-        f"阈值 {MIN_ASR_ACCURACY * 100:.0f}%）"
-    )
     lines.append("")
     lines.append("## 口径说明")
     lines.append("")
-    lines.append("- 门禁只对安静室内条件（clean，"
-                 f"{SNR_BY_CONDITION[GATE_CONDITIONS[0]]} dB）判定 —— "
-                 "端侧 ASR 的职责边界是近场拾音下的固定指令与唤醒。")
-    lines.append("- mild / noisy 条件为**参考值**：音频由 TTS 合成，"
-                 "缺少真人的音高与共振峰细节，属于模型的分布外输入，"
-                 "其数值不代表真人语音在噪声下的表现。")
-    lines.append("- 本报告的准确率**偏乐观**（合成音比真人语音更清晰），"
-                 "不应作为真机指标。")
-    lines.append("- 真人语音的噪声鲁棒性尚未验证，见 docs/known-limitations.md。")
+    lines.extend(_render_methodology(results, verdicts))
 
     failures = [detail for result in results.values() for detail in result.details]
     if failures:
@@ -575,14 +661,101 @@ def render_report(results: dict[str, ConditionResult]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _source_summary(result: ConditionResult) -> str:
+    """把一个条件的音频来源统计成简短描述。
+
+    :param result: 条件结果
+    :return: 形如「真人录音 14」的描述
+    """
+    if not result.sources:
+        return "-"
+    parts = [
+        f"{source.label} {count}"
+        for source, count in result.sources.items()
+        if count > 0
+    ]
+    return " / ".join(parts) if parts else "-"
+
+
+def _render_methodology(
+    results: dict[str, ConditionResult], verdicts: dict[str, str]
+) -> list[str]:
+    """渲染口径说明段落。
+
+    :param results: 各条件结果
+    :param verdicts: 判定说明
+    :return: Markdown 行
+    """
+    all_real = all(
+        result.sources.get(AudioSource.REAL, 0) == result.sample_count
+        for result in results.values()
+        if result.sample_count > 0
+    )
+    real_count = sum(
+        result.sources.get(AudioSource.REAL, 0) for result in results.values()
+    )
+    total_count = sum(result.sample_count for result in results.values())
+
+    lines: list[str] = []
+
+    if all_real:
+        lines.append("- 本次评测**全部使用真人录音**，因此 clean / mild / noisy "
+                     "三个噪声条件均参与门禁判定。")
+        lines.append("- 三个条件分别对应安静室内（30 dB）、轻度环境噪声（20 dB）、"
+                     "中度环境噪声（10 dB），代表真实部署中会遇到的三种拾音环境。")
+        lines.append("- 真人录音由人工朗读参考文本得到，其噪声鲁棒性反映真实人声，"
+                     "可作为真机参考指标。")
+    else:
+        # **必须区分"完全没有"与"部分有"**：说"音频全部由 TTS 合成"
+        # 在只放了 1 条录音时是**不实描述** —— 读者会据此误判整份报告的可信度。
+        if real_count > 0:
+            lines.append(
+                f"- 本次评测**部分使用真人录音**（{real_count} / {total_count} 条），"
+                "其余为 TTS 合成。"
+            )
+            lines.append("- **混用的准确率没有可解释性**：它既不代表真人语音、"
+                         "也不代表合成音。因此只有 clean 参与门禁判定，"
+                         "mild / noisy 为参考值。")
+        else:
+            lines.append("- 本次评测**未取得真人录音**，音频全部由 TTS 合成。")
+            lines.append("- 合成音缺少真人的音高变化与共振峰细节，属于 Whisper 的"
+                         "**分布外输入**；它在噪声下的表现既不代表真人语音，"
+                         "也不能用来判定模型能力。")
+        lines.append("- **clean 参与门禁判定**（合成音在此条件下仍是有意义的"
+                     "下界：连合成音都识别不了，真人语音只会更差），"
+                     "mild / noisy 为参考值，给出「信噪比下降时准确率如何衰减」的趋势。")
+        lines.append("- 本报告的准确率**偏乐观**（合成音比真人语音更清晰），"
+                     "不应作为真机指标。")
+        lines.append("- 补齐真人录音后，mild / noisy 即可升级为门禁条件。"
+                     "接入方式见 core/eval/recordings/README.md 与 "
+                     "docs/known-limitations.md。")
+
+    lines.append("- 门禁只对**样本量达标**的条件判定 —— "
+                 f"样本量需 ≥ {MIN_SAMPLE_SIZE} 条。"
+                 "5 个样本上的 40% 与 500 个样本上的 40% 是两回事。")
+    if not all_real:
+        lines.append("- 真人语音的噪声鲁棒性在**补齐录音前**尚未验证，"
+                     "见 docs/known-limitations.md。")
+
+    return lines
+
+
 def main() -> None:
     """命令行入口。"""
     parser = argparse.ArgumentParser(description="端侧识别维度评测")
     parser.add_argument("--eval-dir", default=DEFAULT_EVAL_DIR, help="评测集目录")
     parser.add_argument("--report", default=None, help="Markdown 报告输出路径")
+    parser.add_argument(
+        "--recording-dir",
+        default=None,
+        help="真人录音目录；默认 core/eval/recordings",
+    )
     args = parser.parse_args()
 
-    results, available = evaluate(Path(args.eval_dir))
+    recording_dir = (
+        Path(args.recording_dir) if args.recording_dir else DEFAULT_RECORDING_DIR
+    )
+    results, available = evaluate(Path(args.eval_dir), recording_dir)
     if not available:
         raise SystemExit(EXIT_ENV_UNAVAILABLE)
 
@@ -594,13 +767,14 @@ def main() -> None:
 
     print(report)
 
-    # 判定依据与报告一致：只看**样本充足且属于门禁条件**的噪声条件。
-    # 报告说"参与判定"的条件集合与退出码依据必须完全一致 ——
-    # 两者不一致会出现"报告说不参与判定，退出码却按它判失败"。
+    # 判定依据与报告一致：直接复用报告用的那份判定结果 ——
+    # 报告说"参与判定"的条件集合与退出码依据必须完全一致，
+    # 否则会出现"报告说不参与判定，退出码却按它判失败"。
+    verdicts = gate_eligibility(results)
     participating = [
         result
         for condition, result in results.items()
-        if result.sample_count >= MIN_SAMPLE_SIZE and condition in GATE_CONDITIONS
+        if verdicts.get(condition) == "参与判定"
     ]
     if not participating:
         raise SystemExit(EXIT_PASSED)

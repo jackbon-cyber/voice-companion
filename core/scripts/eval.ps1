@@ -218,7 +218,17 @@ try {
     if (-not $SkipEdge) {
         Write-Host ''
         Write-Host '=== 4/4 端侧评测 ==='
-        & $python -m core.eval.edge_eval --eval-dir core/eval --report $EdgeReportPath
+        # 真人录音目录：存在时优先使用真人录音，
+        # 让 mild / noisy 两个噪声条件也具备门禁判定资格。
+        #
+        # **为什么用目录而不是逐条开关**：音频来源必须**逐条**决定，
+        # 不能整批切换 —— 混用真人与合成音的准确率没有可解释性。
+        $recordingDir = 'core/eval/recordings'
+        $recordingArg = @()
+        if (Test-Path $recordingDir) {
+            $recordingArg = @('--recording-dir', $recordingDir)
+        }
+        & $python -m core.eval.edge_eval --eval-dir core/eval --report $EdgeReportPath @recordingArg
         $edgeExit = $LASTEXITCODE
         if ($edgeExit -eq $ExitEnvUnavailable) {
             Write-Host '端侧识别模型缺失，端侧识别维度未覆盖。' -ForegroundColor Yellow

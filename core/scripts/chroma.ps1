@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     管理本地 ChromaDB 服务（start / stop / status）。
 
