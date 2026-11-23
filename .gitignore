@@ -60,6 +60,9 @@ eval/reports/*.json
 data/reports/
 data/*.log
 data/*.json
+# 临时的提交信息草稿：写完即删，用 -F 传给 git commit。
+# 不忽略的话容易被 git add -A 一并带进提交。
+data/*.txt
 !data/.gitkeep
 
 # ===== 评测运行产物（评测集本身是源文件，必须入库）=====
