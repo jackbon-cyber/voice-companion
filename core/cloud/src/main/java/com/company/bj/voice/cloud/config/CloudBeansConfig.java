@@ -50,11 +50,27 @@ public class CloudBeansConfig {
     /**
      * 构造协议校验器。
      *
+     * <p>★ 这里做一次**启动期自检**：确认协议 schema 真的能加载到。
+     *
+     * <p>为什么必须有：schema 加载不到时，每条上行消息都会被判
+     * "未知协议 schema"而丢弃，而云端会**退回降级话术继续对话** ——
+     * 一切看起来正常，实际上协议校验完全失效。
+     *
+     * <p>这个缺陷曾真实发生过：schema 住在 {@code core/protocol/schema/}，
+     * 不在 cloud 模块内，没被打进 jar。打成 jar 部署后路径失效，
+     * 而现象只是"机器人回答变敷衍了"，没有任何报错指向真因。
+     *
+     * <p>宁可启动失败 —— 与"Chroma 没就绪就让后端启动失败"是同一个原则：
+     * 依赖缺失时明确失败，好过假装正常。
+     *
      * @return 协议校验器
+     * @throws IllegalStateException 协议 schema 缺失时抛出
      */
     @Bean
     public ProtocolValidator protocolValidator() {
-        return new ProtocolValidator(SCHEMA_DIR);
+        ProtocolValidator validator = new ProtocolValidator(SCHEMA_DIR);
+        validator.assertSchemasLoadable();
+        return validator;
     }
 
     /**

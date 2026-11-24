@@ -88,6 +88,32 @@
     </dependencies>
 
     <build>
+        <resources>
+            <!--
+              协议 schema 进 jar。
+
+              ★ 为什么必须显式声明默认 resources：
+              Maven 的默认 resources 目录是 src/main/resources，而协议 schema
+              实际住在 core/protocol/schema/ —— **不在** cloud 模块里。
+              于是打出来的 fat jar 里没有 schema，部署后每条上行消息都会被判
+              "未知协议 schema"而丢弃。
+
+              而这个缺陷**不会报错**：云端只是退回降级话术继续对话，
+              看起来"能用"，实则协议校验完全失效。
+              实测记录见 docs/operations-manual.md 第 4 章。
+            -->
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <resource>
+                <!-- 协议 schema 打进 jar 的 protocol/schema/ 下 -->
+                <directory>${project.basedir}/../protocol/schema</directory>
+                <targetPath>protocol/schema</targetPath>
+                <includes>
+                    <include>*.schema.json</include>
+                </includes>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.springframework.boot</groupId>
