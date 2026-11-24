@@ -904,7 +904,7 @@ ChromaDB 1.0.0 + 嵌入服务 8766 + 云端后端 8080，
 - ChromaDB 1.0 需要 C++ 编译器，缺时报错极具误导性；
 - 手册的启动顺序与 systemd 单元**漏了嵌入服务**。
 
-**复现脚本**：`data/deploy-test/`（Dockerfile + 4 个探针脚本）。
+**复现脚本**：`core/deploy-test/`（Dockerfile + 4 个探针脚本）。
 
 **未覆盖**：真实服务器（本次是容器形态，systemd 编排**未实测**）、
 TLS 终止与反向代理（`wss://` 链路未实测）、

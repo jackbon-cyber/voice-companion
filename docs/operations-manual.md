@@ -1134,7 +1134,7 @@ wss://voice.example.com:8080/voice/uplink
 ## 4.8 ★ 部署实测记录
 
 > 本节记录**在真实 Linux 容器里按本章步骤跑一遍**的结果。
-> 复现脚本见 `data/deploy-test/`。
+> 复现脚本见 `core/deploy-test/`。
 
 ### 4.8.1 实测环境
 
