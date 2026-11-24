@@ -191,6 +191,19 @@ voice-companion/
 | Maven | 3.9+ | `apache-maven-3.9.2` | `apt install maven` |
 | ChromaDB | 1.0+ | `pip install chromadb` | 同左 |
 
+> ★ **Linux 上的 Python 版本不是"装个 3.13"那么简单**，
+> 还要**发行版本身装得下**。实测（见 4.8.3）：
+>
+> | 目标机 | 装 ChromaDB 1.0 的结果 |
+> |---|---|
+> | Ubuntu 20.04（Python 3.8） | ✗ 装不上。可用版本只到 0.5.23，pip 报错**完全没提 Python 版本**，极易误判为 pip 源问题 |
+> | Debian 13 / Ubuntu 24.04 / `python:3.13-slim` | ✓ 正常 |
+>
+> 另：ChromaDB 1.0 的 `chroma-hnswlib` 在 Python 3.13 上**没有预编译 wheel**，
+> 必须本地编译 —— 目标机需要装 **C++ 编译器**（`build-essential`）。
+> 缺编译器时 pip 报 `Unsupported compiler -- at least C++11 support is needed!`，
+> 这句话**极具误导性**（听起来像编译器版本太老，真相是一个都没装）。
+
 ---
 
 # 第 2 章：本地起服务
@@ -200,12 +213,18 @@ voice-companion/
 ## 2.1 启动顺序（不能改）
 
 ```
-ChromaDB → 云端后端 → 端侧设备
+ChromaDB → 嵌入服务 → 云端后端 → 端侧设备
 ```
 
 **为什么 Chroma 必须先起**：云端后端启动时做一次 Chroma 连通性检查，
 Chroma 没就绪会让后端**启动失败**。这个检查是有意的 ——
 宁可启动失败，也不要让后端在 Chroma 不可用时"假装正常"。
+
+**为什么嵌入服务必须在云端之前**：云端收到上行消息后会**同步**调嵌入服务
+算记忆向量。嵌入服务不可用时，记忆写入和下行回复会**直接失败**
+（不是降级成兜底话术）。实测日志：
+`记忆写入失败，已忽略：local embedding connect failed for http://127.0.0.1:8766/v1/embeddings`
+—— 机器人表现为"完全不回话"，且日志里只有一行 WARN，容易被误判为网络问题。
 
 ## 2.2 一条命令起全部
 
@@ -1000,6 +1019,16 @@ chromadb run --path /opt/voice-companion/data/chroma --host 0.0.0.0 --port 8765 
 # 等 Chroma 就绪
 until curl -sf http://127.0.0.1:8765/api/v2/version >/dev/null; do sleep 2; done
 
+# 起嵌入服务（云端依赖它算记忆向量）
+cd /opt/voice-companion
+python3.13 -m core.edge.embedding.service \
+      --port 8766 \
+      --model-dir core/models/embedding \
+      > core/cloud/logs/embedding.out.log 2>&1 &
+
+# 等嵌入服务就绪
+until curl -sf http://127.0.0.1:8766/v1/health >/dev/null; do sleep 2; done
+
 # 起云端
 nohup java -jar core/cloud/target/voice-cloud-0.0.1-SNAPSHOT.jar \
       > core/cloud/logs/backend.out.log 2>&1 &
@@ -1008,6 +1037,20 @@ nohup java -jar core/cloud/target/voice-cloud-0.0.1-SNAPSHOT.jar \
 until curl -sf http://127.0.0.1:8080/api/health >/dev/null; do sleep 2; done
 echo "服务已就绪"
 ```
+
+> ★ **嵌入服务必须先于云端就绪**。
+> 云端收到"用户说了什么"后会**同步**调嵌入服务算向量，
+> 嵌入服务不可用时记忆写入和下行回复都会失败（不是降级，是直接不回复）。
+> 实测日志：`记忆写入失败，已忽略：local embedding connect failed for http://127.0.0.1:8766/v1/embeddings`
+
+> ★ **协议 schema 已打进 jar，但启动时会自检**。
+> 若 jar 里缺 schema，云端会**明确启动失败**并列出缺哪几个
+> （而不是静默降级 —— 详见 4.8.3）。
+>
+> ```bash
+> # 部署后建议核一次 jar 里有没有 schema
+> jar tf core/cloud/target/voice-cloud-0.0.1-SNAPSHOT.jar | grep protocol/schema
+> ```
 
 > **为什么这里不用 `start.ps1`**：它是 Windows 脚本（PowerShell）。
 > Linux 上要么用 systemd（见 4.6），要么照上面手写。
@@ -1030,7 +1073,8 @@ python3.13 core/scripts/fetch-models.ps1 -Target all   # Windows 版
 ```ini
 [Unit]
 Description=Voice Companion Cloud Backend
-After=network.target chromadb.service
+After=network.target chromadb.service voice-embedding.service
+Requires=voice-embedding.service
 
 [Service]
 Type=simple
@@ -1046,6 +1090,27 @@ RestartSec=10
 [Install]
 WantedBy=multi-user.target
 ```
+
+> ★ **嵌入服务也要有独立的 systemd 单元**，
+> 否则云端起来时嵌入服务还没就绪，表现为"机器人完全不回话"。
+>
+> `/etc/systemd/system/voice-embedding.service`：
+>
+> ```ini
+> [Unit]
+> Description=Voice Companion Local Embedding Service
+> After=network.target
+>
+> [Service]
+> Type=simple
+> WorkingDirectory=/opt/voice-companion
+> ExecStart=/usr/bin/python3.13 -m core.edge.embedding.service --port 8766 --model-dir /opt/voice-companion/core/models/embedding
+> Restart=on-failure
+> RestartSec=10
+>
+> [Install]
+> WantedBy=multi-user.target
+> ```
 
 ```bash
 systemctl daemon-reload
@@ -1066,7 +1131,105 @@ wss://voice.example.com:8080/voice/uplink
 > 否则接入凭据（`Authorization: Bearer`）在网络上**明文传输**。
 > 反向代理需要支持 WebSocket 升级（`Upgrade` / `Connection` 头）。
 
-## 4.8 ★ 生产部署前的待办
+## 4.8 ★ 部署实测记录
+
+> 本节记录**在真实 Linux 容器里按本章步骤跑一遍**的结果。
+> 复现脚本见 `data/deploy-test/`。
+
+### 4.8.1 实测环境
+
+| 项 | 值 |
+|---|---|
+| 基础镜像 | `python:3.13-slim`（Debian 13 trixie） |
+| Java | OpenJDK 21.0.2（华为云 openjdk 镜像） |
+| ChromaDB | 1.0.0（`pip install chromadb==1.0.0`） |
+| 嵌入服务 | `core.edge.embedding.service`，端口 8766 |
+| 凭据 | `VOICE_UPLINK_TOKEN` 已设置 |
+
+### 4.8.2 实测结论
+
+| 断言 | 结果 |
+|---|---|
+| 三服务按 2.1 顺序起来（Chroma → 嵌入 → 云端） | 通过 |
+| `/api/health` 返回 `{"status":"UP"}` | 通过 |
+| 无凭据连上行通道 → HTTP 401 | 通过 |
+| 错误凭据连上行通道 → HTTP 401 | 通过 |
+| 正确凭据连上行通道 → 建会话、发消息、收回复 | 通过 |
+| 记忆写入 → 召回 → 回复引用记忆 ID | 通过 |
+| 跨用户隔离：B 问 A 的事，引用数为 0 | 通过 |
+| 跨用户隔离：B 换说法再问，仍无引用 | 通过 |
+| 跨会话隔离：A 换新会话仍能召回 | 通过 |
+| 容器重启后记忆仍在（同一引用 ID） | 通过 |
+| 协议 schema 缺失时启动失败（exit 1 + 明确报错） | 通过 |
+
+### 4.8.3 ★ 实测发现的问题（已修）
+
+**问题一：协议 schema 没进 jar，部署后协议校验完全失效**
+
+协议 schema 住在 `core/protocol/schema/`，**不在 `core/cloud` 模块内**，
+所以打出来的 fat jar 里没有它。而原来的加载路径是相对工作目录的
+`../protocol/schema` —— 在源码目录里跑恰好成立，**打成 jar 部署后就不存在了**。
+
+**为什么这个缺陷极难发现**：每条上行消息都被判"未知协议 schema"而丢弃，
+而云端会退回降级话术继续对话。现象只是"机器人回答变敷衍了"，
+**没有任何报错指向真因**，而且不会自愈。
+
+**修复**：
+- `core/cloud/pom.xml` 显式声明 `<resources>`，把 schema 打进 jar；
+- `ProtocolValidator` 改为**优先从 classpath 读**，文件系统目录只作开发期备用；
+- `ClasspathSchemaLoader` + `classpath:` IRI 映射，保证跨 schema 的
+  `$ref` 引用（`session` → `audio-negotiation`）在 jar 内能解析；
+- 启动期自检 `assertSchemasLoadable()`：schema 缺失 → **启动失败**，
+  错误信息直接列出缺哪几个、为什么缺。
+
+**同类问题**：引用解析不到时，`$ref` 会被当成不受约束的普通字段，
+**校验反而"通过"了** —— 看起来 schema 在起作用，实际约束全丢。
+`ProtocolValidatorTest` 用一个违反被引用 schema 的载荷守住这条线。
+
+**问题二：部署环境隐含要求 Python 3.13，但手册没说明**
+
+1.3 节只写了"Linux 安装：`python3.13`"，没说目标机得是什么发行版。
+实测踩到的坑：
+
+| 目标机 | 结果 |
+|---|---|
+| Ubuntu 20.04（Python 3.8） | `Could not find a version that satisfies the requirement chromadb==1.0.0`（可用版本只到 0.5.23）。**报错完全没提 Python 版本**，极易误判为 pip 源问题或版本号写错 |
+| `python:3.13-slim` | 正常 |
+
+**问题三：ChromaDB 1.0 需要 C++ 编译器**
+
+`chroma-hnswlib` 在 Python 3.13 上没有预编译 wheel，必须本地编译。
+slim 镜像里 gcc/g++/cc/make **一个都没有**，pip 报的是：
+
+```
+RuntimeError: Unsupported compiler -- at least C++11 support is needed!
+```
+
+这句话**极具误导性** —— 听起来像"装的编译器版本太老"，
+真相是**一个编译器都没有**。排查方向会跑偏到"换个编译器版本"上。
+
+**修复**：部署镜像显式装 `build-essential`。
+
+### 4.8.4 实测确认的既有行为
+
+**记忆按分片存储，问法差异大时正确拒答**。
+
+存 `"我妈妈叫李芳，她对芒果过敏"` 会被切成两个分片
+（`"我妈妈叫李芳"` / `"她对芒果过敏"`），共享同一个 `parent_id`。
+
+- 问 `"我妈妈对什么过敏？"` → 命中分片，得分 **0.5269**，低于相关性下限
+  **0.544** → 正确拒答（"我这边还没有关于这件事的记录"）；
+- 问 `"我妈妈有什么过敏的东西吗？"` → 同上，也是拒答。
+
+**这是正确行为，不是缺陷**：得分低于下限意味着置信度不够，
+此时如实说"没有记录"远好于硬凑一个答案（理由见
+`MemoryRelevancePolicy` 的 Javadoc）。
+
+> ⚠️ **实测确认了一个口径细节**：相关性下限 **0.544** 是在
+> **分片嵌入**的分布上推导的（整句嵌入时是 0.529）。
+> 换回整句存储时阈值必须回到 0.529 —— **沿用旧阈值等于用一把尺子量另一把刻度**。
+
+## 4.9 ★ 生产部署前的待办
 
 **当前形态不能直接上生产。** 至少要完成：
 

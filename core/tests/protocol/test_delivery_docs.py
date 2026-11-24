@@ -232,6 +232,106 @@ def test_deployment_manual_covers_all_ports():
         assert port in manual, f"部署手册缺少端口 {port}"
 
 
+def test_deployment_docs_cover_embedding_service():
+    """嵌入服务是部署的必需组件，两份部署文档都必须写明。
+
+    ★ 这条防线是部署实测补上的。
+    手册原先的启动顺序与 systemd 单元都漏了嵌入服务，
+    而云端是**同步**调它算记忆向量的 ——
+    它不可用时记忆写入与下行回复直接失败（不是降级），
+    表现为"机器人完全不回话"，日志只有一行 WARN，极易误判为网络问题。
+    """
+    deployment = _doc_text("docs/deployment.md")
+    manual = _doc_text("docs/operations-manual.md")
+
+    for name, text in (("deployment.md", deployment), ("operations-manual.md", manual)):
+        assert "8766" in text, f"{name} 未提及嵌入服务端口 8766"
+        assert "嵌入服务" in text, f"{name} 未提及嵌入服务"
+
+    # 启动顺序里必须有它，且在云端之前。
+    for name, text in (("deployment.md", deployment), ("operations-manual.md", manual)):
+        order_line = next(
+            (line for line in text.splitlines() if "→" in line and "云端后端" in line),
+            "",
+        )
+        assert "嵌入服务" in order_line, f"{name} 的启动顺序里没有嵌入服务：{order_line!r}"
+        assert order_line.index("嵌入服务") < order_line.index("云端后端"), (
+            f"{name} 的启动顺序里嵌入服务必须在云端之前：{order_line!r}"
+        )
+
+
+def test_deployment_docs_state_target_machine_prerequisites():
+    """目标机前置要求（Python 3.13、C++ 编译器）必须写出来。
+
+    ★ 这条防线是部署实测补上的。实测踩到的两个坑：
+    1. Ubuntu 20.04（Python 3.8）装不上 ChromaDB 1.0，
+       而 pip 报错**完全没提 Python 版本**，极易误判为 pip 源问题；
+    2. `chroma-hnswlib` 在 Python 3.13 上没有预编译 wheel，必须本地编译，
+       缺编译器时报 `Unsupported compiler -- at least C++11 support is needed!`
+       —— 这句话极具误导性（听起来像编译器版本老，真相是一个都没装）。
+
+    ★ 断言必须写成"**要求行**"，不能只判 `"3.13" in text` ——
+    文件里别处也会出现 3.13（例如"用 JDK 17 运行会报 class file version"那段），
+    只判子串的话，把要求改成 3.8 也能通过（反证时实测过）。
+    """
+    for name in ("docs/deployment.md", "docs/operations-manual.md"):
+        text = _doc_text(name)
+
+        # 必须有一行明确写出 Python 的版本要求。
+        python_lines = [line for line in text.splitlines() if "Python" in line and "|" in line]
+        assert python_lines, f"{name} 没有写 Python 的版本要求"
+        assert any("3.13" in line for line in python_lines), (
+            f"{name} 的 Python 要求行里没有 3.13：{python_lines!r}"
+        )
+
+        # C++ 编译器是硬依赖（chroma-hnswlib 无预编译 wheel）。
+        assert "build-essential" in text, f"{name} 未写明需要 C++ 编译器（build-essential）"
+
+
+def test_protocol_schemas_are_packaged_into_the_jar():
+    """协议 schema 必须打进 jar —— 否则部署后协议校验完全失效。
+
+    ★ 这是部署实测抓到的**最严重**的问题。
+
+    协议 schema 住在 `core/protocol/schema/`，**不在 `core/cloud` 模块内**，
+    默认的 resources 配置打不进 fat jar。而加载路径曾是指向工作目录的
+    相对路径 —— 源码目录里恰好成立，**打成 jar 部署后就不存在了**。
+
+    危险之处在于它**不报错**：每条上行消息都被判"未知协议 schema"而丢弃，
+    云端退回降级话术继续对话 —— 现象只是"机器人变敷衍了"，
+    没有任何报错指向真因。
+
+    这条测试钉的是 **pom.xml 的 resources 配置**，
+    因为那才是"schema 有没有进 jar"的决定点。
+    """
+    pom = (REPO_ROOT / "core" / "cloud" / "pom.xml").read_text(encoding="utf-8")
+
+    assert "<resources>" in pom, "pom.xml 没有声明 resources —— 协议 schema 不会进 jar"
+    assert "protocol/schema" in pom, "pom.xml 的 resources 里没有协议 schema 目录"
+    assert "*.schema.json" in pom, "pom.xml 的 resources 里没有限定 schema 文件"
+
+    # schema 目录本身必须存在且非空。
+    schema_dir = REPO_ROOT / "core" / "protocol" / "schema"
+    assert schema_dir.is_dir(), "协议 schema 目录不存在"
+    schemas = list(schema_dir.glob("*.schema.json"))
+    assert schemas, "协议 schema 目录里没有 schema 文件"
+
+
+def test_deployment_docs_mention_schema_self_check():
+    """两份部署文档都要写明"部署后核一次 jar 里的 schema"。
+
+    这条自检是部署实测加进来的防呆：
+    schema 缺失时云端会**启动失败**（而不是静默降级），
+    但运维在启动前先核一次 jar，问题会在部署机上暴露，
+    而不是等到第一次对话没有反应才发现。
+    """
+    for name in ("docs/deployment.md", "docs/operations-manual.md"):
+        text = _doc_text(name)
+
+        assert "protocol/schema" in text, f"{name} 未写明 schema 的 jar 内路径"
+        assert "jar tf" in text, f"{name} 未给出核 jar 里 schema 的命令"
+
+
 def test_deployment_manual_has_troubleshooting_section():
     manual = _doc_text("docs/deployment.md")
 
