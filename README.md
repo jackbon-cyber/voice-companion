@@ -175,6 +175,7 @@ voice-companion/
 | [`docs/secondary-development.md`](docs/secondary-development.md) | 二次开发 | 换人设/换模型/接自有平台 |
 | [`docs/real-recording-handover.md`](docs/real-recording-handover.md) | 录真人语音的人 | 录音要求、命名规则、到位后要重跑什么 |
 | [`docs/architecture/README.md`](docs/architecture/README.md) | 架构评审 | 端云协同技术架构方案（11 章 + 5 附录）及其构建方式 |
+| [`docs/github-publish-guide.md`](docs/github-publish-guide.md) | 发布者 | 推到 GitHub 的完整步骤与必须勾选的仓库设置 |
 | [`docs/adr/README.md`](docs/adr/README.md) | 接手者 | 关键决策的选项/理由/代价 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 贡献者 | 怎么把改动交进来，哪些改动会让门禁失败 |
 | [`SECURITY.md`](SECURITY.md) | 报告问题的人 | 私下报告渠道 + 当前安全边界（含未实现项） |
