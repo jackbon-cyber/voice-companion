@@ -461,6 +461,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if not args.skip_offline:
+        # **打印一条说明再跑** ——
+        # 离线场景里模拟端会**故意**连一个不可达的端口，
+        # 于是会打出一行 WARN「云端不可达（...），降级为 OFFLINE，转入本地陪伴模式」。
+        #
+        # **为什么必须说明**：这行 WARN 长得**和"云端真的没起来"一模一样**。
+        # 而这两件事的后果完全相反 ——
+        # 前者是**预期的降级行为**（离线那 4 项断言就该过），
+        # 后者是**环境故障**（在线那 4 项断言会挂）。
+        #
+        # 不说明的话，看输出的人无法判断这次降级是设计内的还是故障，
+        # 排查方向会跑偏。实测中确实踩过这个坑：
+        # 第一次跑 `-SkipServices` 时因为云端没起来，
+        # 在线断言失败 + 离线断言全过 —— 形态和"断言逻辑坏了"很像，真因却是环境。
+        print(
+            "说明：以下离线降级检查会故意断开云端连接，"
+            "模拟端打印「云端不可达」是**预期行为**，不是故障。"
+        )
         all_results.extend(asyncio.run(run_offline_checks(args.offline_url, offline_owner)))
 
     report_path = Path(args.report)

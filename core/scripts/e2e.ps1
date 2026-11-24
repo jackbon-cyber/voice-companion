@@ -144,6 +144,27 @@ if (-not $SkipServices) {
     }
 } else {
     Write-Host '=== 1/4 跳过依赖服务启动 ==='
+
+    # **即使跳过启动，也必须探一次后端就绪**。
+    #
+    # **为什么**：`-SkipServices` 的语义是"假定依赖已在运行，不重复拉起"。
+    # 但"假定"不等于"事实" —— 调用者可能在你没起服务时就传了这个开关
+    # （例如手动清过端口，或上一轮的进程刚死）。
+    #
+    # **不探活会怎样**：端到端断言会连上一个**正在关停的僵尸后端**，
+    # 收到空回复，于是两条记忆断言报 `回复='' 引用=[]` 失败，
+    # 而离线降级 4 项**全过**（本地路径根本不依赖后端）。
+    #
+    # **症状与根因分离**：这个形态看起来像"断言逻辑坏了"，
+    # 排查方向会跑到断言代码上 —— 真因是**环境没就绪**。
+    # 探活失败时直接以"环境不可用"退出（退出码 2），与断言失败（退出码 1）区分开。
+    $backendReady = Wait-ForHttpOk -Uri 'http://127.0.0.1:8080/api/health' -TimeoutSeconds 10
+    if (-not $backendReady) {
+        Write-Host '云端后端不可达（:8080）。' -ForegroundColor Red
+        Write-Host '端到端断言依赖云端后端 —— 请先启动它，或去掉 -SkipServices 让脚本自动拉起。' -ForegroundColor Red
+        exit $ExitEnvUnavailable
+    }
+    Write-Host '云端后端已就绪（:8080）'
 }
 
 Write-Host ''
