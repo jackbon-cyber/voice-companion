@@ -1,0 +1,60 @@
+# 统一换行符 —— 端云两侧的文件必须一致，否则 diff 全是噪声
+#
+# 默认：入库统一为 LF，工作区按平台习惯检出。
+# 不这么做的后果：Windows 上检出 LF 文件 → 再提交 → 全部文件显示"已修改"，
+# 评审者看到几百行换行符变更，实际业务改动被淹没。
+* text=auto eol=lf
+
+# ===== 二进制文件（不得做换行符转换）=====
+*.png            binary
+*.jpg            binary
+*.jpeg           binary
+*.gif            binary
+*.ico            binary
+*.pdf            binary
+*.docx           binary
+*.zip            binary
+*.jar            binary
+*.wav            binary
+*.mp3            binary
+*.flac           binary
+*.onnx           binary
+*.gguf           binary
+*.bin            binary
+*.pt             binary
+*.safetensors    binary
+*.tflite         binary
+
+# ===== PowerShell 脚本 =====
+# 必须带 UTF-8 BOM —— Windows PowerShell 5.1 读取无 BOM 的 UTF-8 脚本时
+# 会把中文按系统代码页解码，脚本里出现乱码字符串常量。
+# 这一点由 core/tests/scripts/test_powershell_scripts.py 逐个脚本断言。
+*.ps1            text eol=crlf working-tree-encoding=UTF-8
+
+# ===== 文档 =====
+*.md              text eol=lf
+*.txt             text eol=lf
+
+# ===== 协议 schema（端云两侧共用，必须逐字节一致）=====
+*.json            text eol=lf
+
+# ===== 语言源码 =====
+*.py              text eol=lf
+*.java            text eol=lf
+*.xml             text eol=lf
+*.yaml            text eol=lf
+*.yml             text eol=lf
+*.html            text eol=lf
+*.css             text eol=lf
+*.js              text eol=lf
+
+# ===== Shell 脚本 =====
+# 保留 LF：这些脚本在 Linux 容器里执行，CRLF 会导致 shebang 失效。
+*.sh              text eol=lf
+
+# ===== 生成物标记 =====
+# 明确标记为 linguist-generated，避免 GitHub 语言统计被生成文件带偏。
+core/eval-report.md      linguist-generated=true
+core/eval-report.json    linguist-generated=true
+core/eval-edge-report.md linguist-generated=true
+docs/architecture/*.md   linguist-generated=true
