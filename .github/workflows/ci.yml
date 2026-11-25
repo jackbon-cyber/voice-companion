@@ -1,0 +1,113 @@
+name: CI
+
+# ★ 这个工作流只跑**不依赖外部服务**的检查。
+#
+# 为什么不把 eval.ps1 / e2e.ps1 也搬上来：
+# 它们需要 ChromaDB + 本地嵌入服务 + 可选的大模型凭据，
+# 而模型权重按 ADR-006 不入库（由 core/scripts/fetch-models.ps1 下载）。
+# 在 CI 里复现那套环境会让流水线变得脆弱且难以排查 ——
+# 与其跑一个经常因为环境问题变红的门禁，不如让这三项检查守住真正能守的部分。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  edge:
+    name: 端侧测试（Python）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # ★ 只装跑测试真正需要的依赖。
+      # core/requirements.txt 里的 faster-whisper / llama-cpp-python
+      # 需要编译工具链，在 CI 上装它们既慢又不稳定 ——
+      # 而这两者在测试里都是被 mock 或跳过的。
+      - name: 安装测试依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest==8.4.2 pytest-asyncio==1.1.0 jsonschema==4.25.0 websockets==15.0.1 numpy==2.2.6
+
+      # ★ 依赖本地 Chroma/嵌入服务的用例会**跳过**（本地实测是 518 项里 13 项跳过），
+      # 所以这里不期待 518 全过 —— 关心的是 0 失败。
+      - name: 跑端侧测试
+        run: python -m pytest core/tests -q --tb=short
+
+      - name: 上传测试报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-test-report
+          path: |
+            reports/
+          retention-days: 7
+
+  cloud:
+    name: 云端测试（Java）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      # ★ 必须显式给 Maven 仓库，否则依赖会被下载到 runner 的临时目录，
+      # 缓存 key 也用不上。
+      - name: 配置 Maven 缓存
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('core/cloud/pom.xml') }}
+          restore-keys: ${{ runner.os }}-m2-
+
+      - name: 跑云端测试
+        working-directory: core/cloud
+        run: mvn -B test
+
+  protocol:
+    name: 协议一致性（Python 与 Java 判定必须相同）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装校验依赖
+        run: python -m pip install jsonschema==4.25.0
+
+      # ★ 协议 schema 只有一份，但校验器有两份实现（Python 与 Java）。
+      # 两侧判定不一致 = 真机上会出现"端侧认为合法、云端认为非法"的静默丢包，
+      # 所以这项检查独立成 job，失败时一眼能看出是协议侧的问题。
+      - name: 跑协议一致性校验
+        run: pwsh -File core/scripts/validate-protocol.ps1
+
+  docs:
+    name: 交付文档一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: 安装校验依赖
+        run: python -m pip install pytest==8.4.2 pytest-asyncio==1.1.0 jsonschema==4.25.0
+
+      # ★ 交付文档（部署手册、已知限制、二次开发指南、README）
+      # 与代码之间有一致性契约，用测试钉住。
+      - name: 跑交付文档一致性测试
+        run: python -m pytest core/tests/protocol/test_delivery_docs.py core/tests/test_readme_quickstart.py core/tests/test_repo_layout.py -q --tb=short

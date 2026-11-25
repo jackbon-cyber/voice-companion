@@ -28,9 +28,23 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $CoreRoot = Split-Path -Parent $PSScriptRoot
-$SchemaDir = Join-Path $CoreRoot 'protocol\schema'
-$SamplesPath = Join-Path $CoreRoot 'cloud\src\test\resources\protocol-samples\samples.json'
-$PythonExe = 'F:\tools\python313\python.exe'
+# ★ 路径用 '/' 分隔 —— PowerShell 在 Windows 与 Linux 上都认它，
+# 而 '\' 在 Linux 上会被当成普通字符，拼出来的路径直接不存在。
+$SchemaDir = Join-Path $CoreRoot 'protocol/schema'
+$SamplesPath = Join-Path $CoreRoot 'cloud/src/test/resources/protocol-samples/samples.json'
+
+# ★ Python 解释器按"环境变量 → PATH → 本机默认路径"三级回退解析。
+#
+# **为什么不写死路径**：写死 `F:\tools\python313\python.exe` 在本机最省事，
+# 但那台机器之外的任何环境（CI runner、另一个开发者的电脑、容器）
+# 都会直接失败 —— 而且失败信息是"找不到文件"，与真实原因无关。
+# 三级回退让同一份脚本在 Windows / Linux / CI 上都能跑。
+$PythonExe = if ($env:VOICE_PYTHON_EXE) {
+    $env:VOICE_PYTHON_EXE
+} else {
+    $onPath = Get-Command python -ErrorAction SilentlyContinue
+    if ($onPath) { $onPath.Source } else { 'python' }
+}
 
 if (-not (Test-Path $SchemaDir)) {
     throw "找不到协议 schema 目录：$SchemaDir"

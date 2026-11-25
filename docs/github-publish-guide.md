@@ -64,22 +64,19 @@ git push -u origin feature/phase1-protocol-simulator
 
 ### 2.3 默认分支
 
-当前分支名为 `feature/phase1-protocol-simulator`。推送后有两种处理：
-
-**方式 A：改名为 `main`（推荐，GitHub 默认约定）**
+**本仓库已把分支改名为 `main`**（原来的 `feature/phase1-protocol-simulator`），
+全部 60 个提交都在这一条分支上。推送时直接推 `main`：
 
 ```powershell
-git branch -m main
 git push -u origin main
 ```
 
-**方式 B：保留分支名，在 GitHub 网页上改默认分支**
+推送后到 GitHub 网页确认 **Settings** → **Branches** →
+右侧 **Default branch** 显示为 `main`（新建仓库时默认就是它，一般无需改）。
 
-仓库 → **Settings** → **Branches** → 右侧 **Default branch** → 改成
-`feature/phase1-protocol-simulator`。
-
-> 全部 59 个提交都在这一条分支上，没有 `main` / `master`。
-> **不处理的话，仓库会有两个默认分支候选**，clone 下来时 Git 会提示选哪个。
+> 改名之前的分支名若已被别人 clone 过，对方需要
+> `git branch -m main && git push -u origin main`，
+> 或 `git remote set-head origin -a` 切过去。
 
 ---
 
@@ -115,21 +112,24 @@ git push -u origin main
 
 **Settings** → **General** → **Features** → **Issues** → 勾选 **Enable**。
 
-建议同时建几个 issue 模板（`.github/ISSUE_TEMPLATE/`），
-至少一个"功能请求"、一个"缺陷报告"。缺陷报告模板建议含：
+**issue 模板已内置**（`.github/ISSUE_TEMPLATE/`）：缺陷报告 + 功能请求。
 
-- 复现步骤
-- 实际结果 / 预期结果
-- 环境（JDK / Python / OS）
-- **是否触及已知限制** —— 这一栏很重要，能挡住"这个功能怎么不支持"的重复提问
+缺陷报告模板里有一栏值得特别说明：
+
+> **是否触及已知限制** —— 这一栏能挡住"这个功能怎么不支持"的重复提问。
+> 先查 `docs/known-limitations.md`，若已记录过就勾选并注明条目编号，
+> 省掉一轮重复排查。
 
 ### 3.4 Pull Requests
 
 **Settings** → **General** → **Features** → **Pull Requests** → 勾选 **Enable**。
 
-建议同时建一个 PR 模板（`.github/PULL_REQUEST_TEMPLATE.md`），
-内容与 `CONTRIBUTING.md` §7 一致：改了什么 / 为什么 / **怎么验证的（附实测数字）**
+**PR 模板已内置**（`.github/PULL_REQUEST_TEMPLATE.md`），内容与
+`CONTRIBUTING.md` §7 一致：改了什么 / 为什么 / **怎么验证的（附实测数字）**
 / 影响面 / 已知限制是否变化。
+
+模板里"怎么验证的"一栏明确要求**贴实测数字**，
+不接受"测试通过"这种没有数字的话。
 
 ### 3.5 Discussions（讨论区）
 
@@ -162,57 +162,44 @@ git push -u origin main
 
 ---
 
-## 4. CI 工作流（可选但推荐）
+## 4. CI 工作流（**已内置**，见 `.github/workflows/ci.yml`）
 
-GitHub 托管的 runner 没有本机的 JDK / Python / ChromaDB，
-所以**不是所有检查都能搬上去**。能搬的与不能搬的：
+仓库里**已经放好**一份可用的 CI 工作流，推上去即生效。它跑四个 job：
 
-| 检查 | 能否上 CI | 说明 |
+| job | 检查 | 依赖 |
 |---|---|---|
-| `pytest core\tests` | ✅ 能 | 但有 13 项依赖本地服务的用例会跳过 |
-| `mvn test` | ✅ 能 | JDK 21 + Maven 3.9 即可 |
-| `validate-protocol.ps1` | ✅ 能 | 纯静态校验，无外部依赖 |
-| `eval.ps1` | ⚠️ 需 Chroma + 嵌入服务 | 可用 service container，但模型权重要另找来源 |
-| `e2e.ps1` | ⚠️ 需完整环境 | 同上，且需要 LLM 可选凭据 |
-| 架构文档漂移校验 | ✅ 能 | `tools\sync_parts_from_product.py --check` |
+| `edge` | 端侧测试（Python） | 仅 pytest / jsonschema / websockets / numpy |
+| `cloud` | 云端测试（Java） | JDK 21 + Maven |
+| `protocol` | 协议一致性（两侧判定必须相同） | pwsh + jsonschema |
+| `docs` | 交付文档一致性 | 同 edge |
 
-最省事的一版：先只把**端侧测试 + 云端测试 + 协议一致性**放进 CI。
-这三样覆盖了绝大部分回归风险，且不依赖任何外部服务。
+> **为什么 `eval.ps1` / `e2e.ps1` 不在 CI 里**：
+> 它们需要 ChromaDB + 本地嵌入服务 + 可选的大模型凭据，
+> 而模型权重按 ADR-006 不入库（由 `core/scripts/fetch-models.ps1` 下载）。
+> 与其跑一个经常因为环境问题变红的门禁，不如让这四项守住真正能守的部分。
+>
+> **端侧测试在 CI 上会有跳过项** —— 依赖本地服务的用例跳过，
+> 本地实测是 518 项里 13 项跳过。**关心的是 0 失败，不是 518 全过。**
 
-示例工作流（`.github/workflows/ci.yml`）：
+**唯一需要手动开的设置**：
 
-```yaml
-name: CI
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+**Settings** → **Actions** → **General** → 勾选
+**"Allow all actions and reusable workflows"**（或按需限定）。
 
-jobs:
-  edge:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
-      - run: pip install -r core/requirements.txt
-      - run: python -m pytest core/tests -q
+若要启用**分支保护**，先让 CI 跑一次拿到 check 名称，再在
+**Settings** → **Branches** → **Add rule** 里勾
+*Require status checks to pass*。
 
-  cloud:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          java-version: '21'
-          distribution: 'temurin'
-      - run: mvn -f core/cloud/pom.xml test
-```
+### 4.1 为此做的两处可移植性修复
 
-> 端侧测试里有 13 项依赖本地 Chroma/嵌入服务的用例会**跳过**，
-> CI 上显示 `skipped` 是正常的 —— 本地实测是 518 项里 13 项跳过。
+CI runner 是 Linux，因此顺手修掉两处会在 CI 上直接失败的问题：
+
+1. `validate-protocol.ps1` 里写死的 `F:\tools\python313\python.exe`
+   → 改为**环境变量 → PATH → 默认值**三级回退解析；
+2. 该脚本里的 `protocol\schema` 反斜杠路径
+   → 改为 `protocol/schema`，PowerShell 在 Windows 与 Linux 上都认。
+
+本机复验：28 条样例仍全过；`core/tests/scripts` 15 项全过（含 BOM 断言）。
 
 ---
 
