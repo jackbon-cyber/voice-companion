@@ -20,7 +20,57 @@
 | 端到端门禁 | `core\scripts\e2e.ps1` | **8/8 断言全过** |
 | 评测门禁 | `core\scripts\eval.ps1` | **五维 + 次级门禁全过** |
 | 部署反证 | `core\deploy-test\verify_deploy_tests_catch.py` | 三处破坏均被咬住，恢复后全绿 |
-| 凭据扫描 | 全仓 `sk-*` / `ghp_*` / `AKIA*` 模式 | **无命中** |
+| 凭据扫描 | `tools\audit_secrets.py` | **63 个提交全历史 0 命中**（真实凭据形态） |
+
+### 1.1 凭据泄漏审计（发布前必跑）
+
+> ⚠️ **仓库是 public 的** —— 任何人都能 clone。
+> 凭据一旦入库，影响面就是全网。所以推送前跑这个：
+
+```powershell
+python tools\audit_secrets.py        # 扫本地全历史
+python tools\audit_github_secrets.py # 从 GitHub 侧拉回来再扫
+```
+
+**两个脚本扫的不是一回事**：
+
+| 脚本 | 扫什么 | 为什么要两个 |
+|---|---|---|
+| `audit_secrets.py` | 本地 git **全历史**（所有提交的文件内容 + 提交信息 + 未跟踪文件） | 泄漏更常发生在"先提交、后删除"的路径上 —— 只扫当前工作区会漏 |
+| `audit_github_secrets.py` | 从 `raw.githubusercontent.com` **把文件拉回来**扫 + 查 GitHub Secret Scanning | 验证的是"用户实际能下载到的内容"，并借 GitHub 自己的规则做交叉判定 |
+
+**判定标准是"真实凭据形态"而非"出现前缀就算"**：
+
+| 形态 | 判定 |
+|---|---|
+| `ghp_` + 36 位 base62 | 真实 classic PAT |
+| `github_pat_` + 22 位以上 | 真实 fine-grained PAT |
+| `AKIA` + 16 位大写 | AWS Access Key |
+| `sk-` + 32 位 hex | DashScope key |
+| `-----BEGIN ... PRIVATE KEY-----` | 私钥内容 |
+
+文档里写"Token 形如 `ghp_xxx`"是**正常的说明文字**，不是泄漏 ——
+按"前缀 + 长度 + 字符集"判定才能把两者分开，否则告警会淹掉真问题。
+
+**本仓库的实测结论（2026-11-26）**：
+
+```
+本地全历史 63 个提交          → 0 命中
+提交信息                     → 0 命中
+未跟踪文件                   → 0 命中
+.env 是否入库                 → 从未进入任何提交（.gitignore 第 44 行）
+GitHub Secret Scanning       → 0 条告警
+从 GitHub 拉回文件重扫        → 0 命中
+仓库可见性                   → public（★ 所以更不能有凭据）
+```
+
+`.env`（存 Token 的本地文件）**已被 `.gitignore` 排除**，
+`.git-credential-helper.sh`（本地凭据助手）同样排除 ——
+两个都**从未进入任何提交**。
+
+> **推完之后建议把 Token 撤掉**：代码已经在 GitHub 上了，
+> Token 就没有存在必要了。到 <https://github.com/settings/tokens> 删掉即可。
+> 删 Token 不影响仓库里的任何东西 —— `.env` 是本地文件、不入库。
 
 ---
 
