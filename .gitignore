@@ -48,6 +48,11 @@ local.properties
 application-local.yml
 application-local.yaml
 
+# ★ 本地 git 凭据助手 —— 从 .env 读 Token，**只在本机用**，不入库。
+# 入库等于把"怎么取 Token"的脚本公开，对使用者没价值，
+# 反而让"凭据处理"这件事多一个需要审阅的文件。
+.git-credential-helper.sh
+
 # ===== 日志与运行时产物 =====
 logs/
 *.log

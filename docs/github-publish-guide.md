@@ -51,8 +51,15 @@ git remote add origin https://github.com/<你的账号>/voice-companion.git
 git remote -v
 
 # 推送
-git push -u origin feature/phase1-protocol-simulator
+git push -u origin main
 ```
+
+> 也可以用仓库里自带的脚本一步完成"建仓 + 关联"：
+> ```powershell
+> python tools\create_github_repo.py
+> ```
+> 它从 `.env` 读凭据（Token 不进命令行），建仓时顺手设好
+> Description 与 Topics，并自动关联 `origin`。
 
 推送时 GitHub 会要求认证，三选一：
 
@@ -162,8 +169,46 @@ git push -u origin main
 
 ---
 
-## 4. CI 工作流（**已内置**，见 `.github/workflows/ci.yml`）
+### 4.0 ⚠️ 推送前必读：PAT 的 `workflow` scope
 
+**GitHub 有一条硬规则**：用 PAT 推送时，如果提交里包含
+`.github/workflows/` 下的文件，**该 PAT 必须有 `workflow` scope**，
+否则整个 push 被拒：
+
+```
+! [remote rejected] main -> main (refusing to allow a Personal Access Token
+  to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)
+```
+
+**本仓库踩过这个坑**（2026-11-26 实测）。生成 Token 时，
+`repo` scope 不够，**还要勾 `workflow`**：
+
+<https://github.com/settings/tokens> → Generate new token (classic) →
+勾选 **`repo`** + **`workflow`** → Generate。
+
+**为什么不能用"先推别的、workflow 以后补"绕过**：
+GitHub 检查的是**提交树里的文件**，不是工作区状态。
+把 `ci.yml` 从工作区删掉再推，照样被拒 —— 这条路已实测验证过。
+
+> 另一种做法是改用 **SSH 推送**（SSH key 不受 PAT scope 限制）。
+> 但那需要另配 SSH key，步骤更多；**加一个 scope 更简单**。
+
+检查当前 Token 的 scope（Token 存在 `.env` 里，不会进命令行）：
+
+```powershell
+python tools\check_token_scopes.py
+```
+
+输出示例：
+
+```
+身份：jackbon-cyber
+scopes：repo
+推送所需：['repo', 'workflow']
+缺少：['workflow']
+```
+
+## 4. CI 工作流（**已内置**，见 `.github/workflows/ci.yml`）
 仓库里**已经放好**一份可用的 CI 工作流，推上去即生效。它跑四个 job：
 
 | job | 检查 | 依赖 |
